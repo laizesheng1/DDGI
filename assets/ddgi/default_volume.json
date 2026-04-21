@@ -1,0 +1,12 @@
+{
+  "origin": [-8.0, 1.0, -8.0],
+  "probeSpacing": [2.0, 2.0, 2.0],
+  "probeCounts": [9, 5, 9],
+  "raysPerProbe": 128,
+  "irradianceOctSize": 8,
+  "depthOctSize": 16,
+  "hysteresis": 0.97,
+  "normalBias": 0.20,
+  "viewBias": 0.10,
+  "sdfProbePushDistance": 0.35
+}

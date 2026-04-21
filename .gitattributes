@@ -1,0 +1,56 @@
+* text=auto
+
+# Source and build scripts keep LF in the repository and working tree.
+*.c      text eol=lf
+*.cc     text eol=lf
+*.cpp    text eol=lf
+*.cxx    text eol=lf
+*.h      text eol=lf
+*.hh     text eol=lf
+*.hpp    text eol=lf
+*.hxx    text eol=lf
+*.inl    text eol=lf
+*.cmake  text eol=lf
+CMakeLists.txt text eol=lf
+
+# Shader sources.
+*.glsl   text eol=lf
+*.vert   text eol=lf
+*.frag   text eol=lf
+*.comp   text eol=lf
+*.rgen   text eol=lf
+*.rmiss  text eol=lf
+*.rchit  text eol=lf
+*.rahit  text eol=lf
+
+# Project text files.
+.gitattributes text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.json   text eol=lf
+*.fnt    text eol=lf
+*.gltf   text eol=lf
+*.natvis text eol=lf
+*.dat    text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.py     text eol=lf
+
+# Binary assets and libraries.
+*.bin    binary
+*.glb    binary
+*.ktx    binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ttf    binary
+*.lib    binary
+*.dll    binary
+*.spv    binary
+
+# Keep imported assets and third-party dependencies as-is to avoid noisy
+# line-ending conversions when adding the whole workspace.
+assets/**   -text
+external/** -text
+libs/**     -text
