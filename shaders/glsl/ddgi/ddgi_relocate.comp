@@ -1,8 +1,69 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "../common/ddgi_common.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
+struct DDGIFrameConstants {
+    mat4 view;
+    mat4 projection;
+    vec4 cameraPosition;
+    vec4 volumeOriginAndRays;
+    vec4 probeSpacingAndHysteresis;
+    uvec4 probeCounts;
+    vec4 biasAndDebug;
+    uvec4 atlasLayout;
+};
+
+struct DDGIProbeRayData {
+    vec4 radianceAndDistance;
+    vec4 directionAndDistanceSquared;
+};
+
+layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
+    DDGIFrameConstants constants;
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer ProbeRayDataBuffer {
+    DDGIProbeRayData probeRayData[];
+};
+
+layout(set = 0, binding = 2, std430) buffer ProbeOffsetsBuffer {
+    vec4 probeOffsets[];
+};
+
 void main()
 {
-    // TODO: Relocate probes using hit distances.
+    uint probeIndex = gl_GlobalInvocationID.x;
+    uint probeCount = constants.probeCounts.x * constants.probeCounts.y * constants.probeCounts.z;
+    if (probeIndex >= probeCount) {
+        return;
+    }
+
+    uint raysPerProbe = max(uint(constants.volumeOriginAndRays.w), 1u);
+    float pushDistance = max(constants.biasAndDebug.z, 0.0);
+    vec3 accumulatedPush = vec3(0.0);
+    float accumulatedWeight = 0.0;
+    uint rayBaseIndex = probeIndex * raysPerProbe;
+
+    for (uint rayIndex = 0u; rayIndex < raysPerProbe; ++rayIndex) {
+        DDGIProbeRayData rayData = probeRayData[rayBaseIndex + rayIndex];
+        float hitDistance = rayData.radianceAndDistance.w;
+        if (hitDistance < pushDistance) {
+            vec3 rayDirection = ddgiSafeNormalize(rayData.directionAndDistanceSquared.xyz);
+            float weight = 1.0 - clamp(hitDistance / max(pushDistance, DDGI_EPSILON), 0.0, 1.0);
+            accumulatedPush -= rayDirection * weight * pushDistance;
+            accumulatedWeight += weight;
+        }
+    }
+
+    vec3 oldOffset = probeOffsets[probeIndex].xyz;
+    vec3 targetOffset = accumulatedWeight > DDGI_EPSILON
+        ? accumulatedPush / accumulatedWeight
+        : oldOffset * 0.95;
+
+    vec3 maxOffset = constants.probeSpacingAndHysteresis.xyz * 0.45;
+    vec3 relocatedOffset = clamp(mix(oldOffset, targetOffset, 0.25), -maxOffset, maxOffset);
+    probeOffsets[probeIndex] = vec4(relocatedOffset, 0.0);
 }

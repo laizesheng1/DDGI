@@ -29,6 +29,7 @@ struct DDGIFrameConstants {
     glm::vec4 probeSpacingAndHysteresis{0.0f};
     glm::uvec4 probeCounts{0u};
     glm::vec4 biasAndDebug{0.0f};
+    glm::uvec4 atlasLayout{0u};
 };
 
 enum class DebugTexture {

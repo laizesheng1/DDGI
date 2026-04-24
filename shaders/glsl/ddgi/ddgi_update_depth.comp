@@ -1,8 +1,91 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "../common/ddgi_common.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+struct DDGIFrameConstants {
+    mat4 view;
+    mat4 projection;
+    vec4 cameraPosition;
+    vec4 volumeOriginAndRays;
+    vec4 probeSpacingAndHysteresis;
+    uvec4 probeCounts;
+    vec4 biasAndDebug;
+    uvec4 atlasLayout;
+};
+
+struct DDGIProbeRayData {
+    vec4 radianceAndDistance;
+    vec4 directionAndDistanceSquared;
+};
+
+layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
+    DDGIFrameConstants constants;
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer ProbeRayDataBuffer {
+    DDGIProbeRayData probeRayData[];
+};
+
+layout(set = 0, binding = 5, r32f) uniform image2D depthAtlas;
+
+bool resolveDepthTexel(out uint probeIndex, out uvec2 octTexel)
+{
+    uint tileSize = constants.atlasLayout.w + 2u;
+    uvec2 atlasTexel = gl_GlobalInvocationID.xy;
+    uvec2 atlasSize = uvec2(imageSize(depthAtlas));
+    if (atlasTexel.x >= atlasSize.x || atlasTexel.y >= atlasSize.y) {
+        return false;
+    }
+
+    uvec2 localTexel = atlasTexel % tileSize;
+    if (localTexel.x == 0u || localTexel.y == 0u ||
+        localTexel.x == tileSize - 1u || localTexel.y == tileSize - 1u) {
+        return false;
+    }
+
+    uvec2 tileCoord = atlasTexel / tileSize;
+    probeIndex = tileCoord.x + tileCoord.y * constants.atlasLayout.x;
+    uint probeCount = constants.probeCounts.x * constants.probeCounts.y * constants.probeCounts.z;
+    if (probeIndex >= probeCount) {
+        return false;
+    }
+
+    octTexel = localTexel - uvec2(1u);
+    return true;
+}
+
 void main()
 {
-    // TODO: Accumulate mean hit distance into the depth atlas.
+    uint probeIndex = 0u;
+    uvec2 octTexel = uvec2(0u);
+    if (!resolveDepthTexel(probeIndex, octTexel)) {
+        return;
+    }
+
+    uint raysPerProbe = max(uint(constants.volumeOriginAndRays.w), 1u);
+    vec3 texelDirection = ddgiOctTexelDirection(octTexel, constants.atlasLayout.w);
+
+    float accumulatedDistance = 0.0;
+    float accumulatedWeight = 0.0;
+    uint rayBaseIndex = probeIndex * raysPerProbe;
+    for (uint rayIndex = 0u; rayIndex < raysPerProbe; ++rayIndex) {
+        DDGIProbeRayData rayData = probeRayData[rayBaseIndex + rayIndex];
+        vec3 rayDirection = ddgiSafeNormalize(rayData.directionAndDistanceSquared.xyz);
+        float cosineWeight = pow(max(dot(texelDirection, rayDirection), 0.0), 32.0);
+        accumulatedDistance += rayData.radianceAndDistance.w * cosineWeight;
+        accumulatedWeight += cosineWeight;
+    }
+
+    float newDepth = accumulatedWeight > DDGI_EPSILON
+        ? accumulatedDistance / accumulatedWeight
+        : 1.0e27;
+
+    ivec2 atlasTexel = ivec2(gl_GlobalInvocationID.xy);
+    float previousDepth = imageLoad(depthAtlas, atlasTexel).r;
+    float hysteresis = constants.probeCounts.w == 0u ? 0.0 : clamp(constants.probeSpacingAndHysteresis.w, 0.0, 1.0);
+    float blendedDepth = mix(previousDepth, newDepth, 1.0 - hysteresis);
+    imageStore(depthAtlas, atlasTexel, vec4(blendedDepth, 0.0, 0.0, 0.0));
 }

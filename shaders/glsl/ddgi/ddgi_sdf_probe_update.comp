@@ -2,7 +2,44 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
+const uint DDGI_PROBE_STATE_ACTIVE = 0u;
+
+struct DDGIFrameConstants {
+    mat4 view;
+    mat4 projection;
+    vec4 cameraPosition;
+    vec4 volumeOriginAndRays;
+    vec4 probeSpacingAndHysteresis;
+    uvec4 probeCounts;
+    vec4 biasAndDebug;
+    uvec4 atlasLayout;
+};
+
+layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
+    DDGIFrameConstants constants;
+};
+
+layout(set = 0, binding = 2, std430) buffer ProbeOffsetsBuffer {
+    vec4 probeOffsets[];
+};
+
+layout(set = 0, binding = 3, std430) buffer ProbeStatesBuffer {
+    uint probeStates[];
+};
+
 void main()
 {
-    // TODO: Push probes out of SDF-occupied space.
+    uint probeIndex = gl_GlobalInvocationID.x;
+    uint probeCount = constants.probeCounts.x * constants.probeCounts.y * constants.probeCounts.z;
+    if (probeIndex >= probeCount) {
+        return;
+    }
+
+    // Current SDFVolume has no GPU texture descriptor yet. This pass still
+    // keeps the probe metadata valid and deterministic so the later SDF sample
+    // can be added without changing the DDGI resource layout.
+    vec3 maxOffset = constants.probeSpacingAndHysteresis.xyz * 0.45;
+    vec3 clampedOffset = clamp(probeOffsets[probeIndex].xyz, -maxOffset, maxOffset);
+    probeOffsets[probeIndex] = vec4(clampedOffset, 0.0);
+    probeStates[probeIndex] = DDGI_PROBE_STATE_ACTIVE;
 }

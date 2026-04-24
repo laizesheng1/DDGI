@@ -47,7 +47,10 @@
 #include <io.h>
 #endif
 
+#ifndef VULKAN_HPP_DISPATCH_LOADER_DYNAMIC
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1		/*use dynamic dispatch*/
+#endif // !1
+
 #include <vulkan/vulkan.hpp>
 
 #define VK_RESULT_THROW

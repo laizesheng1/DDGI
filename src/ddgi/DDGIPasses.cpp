@@ -14,12 +14,14 @@ void ProbeUpdatePass::record(vk::CommandBuffer commandBuffer, DDGIVolume& volume
 
 void ProbeRelocationPass::record(vk::CommandBuffer, DDGIVolume&)
 {
-    // TODO: Implement probe relocation compute dispatch.
+    // Relocation is scheduled inside DDGIVolume::updateProbes() so it shares
+    // barriers and descriptors with classification and atlas updates.
 }
 
 void ProbeClassificationPass::record(vk::CommandBuffer, DDGIVolume&)
 {
-    // TODO: Implement probe classification compute dispatch.
+    // Classification is scheduled inside DDGIVolume::updateProbes() so probe
+    // state writes are synchronized before atlas accumulation.
 }
 
 } // namespace ddgi

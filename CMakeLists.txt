@@ -23,6 +23,8 @@ find_package(Vulkan REQUIRED)
 message(STATUS "Vulkan found: ${Vulkan_FOUND}")
 find_program(GLSLC_EXECUTABLE glslc REQUIRED)
 message(STATUS "glslc found: ${GLSLC_EXECUTABLE}")
+find_program(SPIRV_VAL_EXECUTABLE spirv-val REQUIRED)
+message(STATUS "spirv-val found: ${SPIRV_VAL_EXECUTABLE}")
 
 set(SHADER_SOURCE_DIR ${CMAKE_SOURCE_DIR}/shaders/glsl)
 file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS
@@ -40,8 +42,9 @@ foreach(SHADER ${SHADER_SOURCES})
     add_custom_command(
         OUTPUT ${SHADER_SPIRV}
         COMMAND ${GLSLC_EXECUTABLE} --target-env=vulkan1.3 ${SHADER} -o ${SHADER_SPIRV}
+        COMMAND ${SPIRV_VAL_EXECUTABLE} --target-env vulkan1.3 ${SHADER_SPIRV}
         DEPENDS ${SHADER}
-        COMMENT "Compiling ${SHADER} to SPIR-V"
+        COMMENT "Compiling and validating ${SHADER} to SPIR-V"
     )
 
     list(APPEND SPIRV_FILES ${SHADER_SPIRV})

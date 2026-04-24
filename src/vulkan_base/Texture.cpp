@@ -467,9 +467,14 @@ namespace vkm {
 		{
 			// Texture is stored in an external ktx file
 			std::string filename = path + "/" + gltfimage.uri;
-			ktxTexture* ktxTexture;
-			//ktxResult result = loadKTXFile(filename, &ktxTexture);
+			ktxTexture* ktxTexture = nullptr;
+			ktxResult result = loadKTXFile(filename, &ktxTexture);
+			if (result != KTX_SUCCESS || ktxTexture == nullptr)
+			{
+				vkm::tools::exitFatal("Could not load glTF KTX texture format from " + filename, -1);
+			}
 			format = vk::Format(ktxTexture_GetVkFormat(ktxTexture));
+			ktxTexture_Destroy(ktxTexture);
 			loadFromFile(filename, format, copyQueue, vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
 				vk::ImageLayout::eShaderReadOnlyOptimal);
 		}

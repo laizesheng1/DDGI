@@ -1,7 +1,93 @@
 #version 460
 #extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "../common/ddgi_common.glsl"
+
+struct DDGIFrameConstants {
+    mat4 view;
+    mat4 projection;
+    vec4 cameraPosition;
+    vec4 volumeOriginAndRays;
+    vec4 probeSpacingAndHysteresis;
+    uvec4 probeCounts;
+    vec4 biasAndDebug;
+    uvec4 atlasLayout;
+};
+
+struct DDGIProbeRayData {
+    vec4 radianceAndDistance;
+    vec4 directionAndDistanceSquared;
+};
+
+struct DDGITracePayload {
+    vec3 radiance;
+    float distance;
+    vec3 direction;
+    float distanceSquared;
+};
+
+layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
+    DDGIFrameConstants constants;
+};
+
+layout(set = 0, binding = 1, std430) buffer ProbeRayDataBuffer {
+    DDGIProbeRayData probeRayData[];
+};
+
+layout(set = 0, binding = 2, std430) readonly buffer ProbeOffsetsBuffer {
+    vec4 probeOffsets[];
+};
+
+layout(set = 0, binding = 3, std430) readonly buffer ProbeStatesBuffer {
+    uint probeStates[];
+};
+
+layout(set = 1, binding = 0) uniform accelerationStructureEXT sceneTlas;
+layout(location = 0) rayPayloadEXT DDGITracePayload payload;
 
 void main()
 {
-    // TODO: Generate DDGI probe rays and trace against TLAS.
+    uint raysPerProbe = max(uint(constants.volumeOriginAndRays.w), 1u);
+    uint globalRayIndex = gl_LaunchIDEXT.x;
+    uint probeIndex = globalRayIndex / raysPerProbe;
+    uint rayIndex = globalRayIndex - probeIndex * raysPerProbe;
+    uint probeCount = constants.probeCounts.x * constants.probeCounts.y * constants.probeCounts.z;
+    if (probeIndex >= probeCount) {
+        return;
+    }
+
+    uvec3 probeCoord = ddgiProbeCoord(probeIndex, constants.probeCounts.xyz);
+    vec3 probeOriginWorld = ddgiProbeWorldPosition(
+        probeCoord,
+        constants.volumeOriginAndRays.xyz,
+        constants.probeSpacingAndHysteresis.xyz);
+    probeOriginWorld += probeOffsets[probeIndex].xyz;
+
+    float frameRotation = float(constants.probeCounts.w & 1023u) * DDGI_GOLDEN_ANGLE;
+    vec3 rayDirectionWorld = ddgiFibonacciDirection(rayIndex, raysPerProbe, frameRotation);
+
+    payload.radiance = vec3(0.0);
+    payload.distance = 1.0e27;
+    payload.direction = rayDirectionWorld;
+    payload.distanceSquared = payload.distance * payload.distance;
+
+    // Ray flags keep the first implementation simple: opaque triangle hits only.
+    // Any-hit/material alpha support can be added after scene material buffers
+    // are available to the hit shader.
+    traceRayEXT(
+        sceneTlas,
+        gl_RayFlagsOpaqueEXT,
+        0xff,
+        0,
+        0,
+        0,
+        probeOriginWorld,
+        0.01,
+        rayDirectionWorld,
+        1.0e27,
+        0);
+
+    probeRayData[globalRayIndex].radianceAndDistance = vec4(payload.radiance, payload.distance);
+    probeRayData[globalRayIndex].directionAndDistanceSquared = vec4(rayDirectionWorld, payload.distanceSquared);
 }

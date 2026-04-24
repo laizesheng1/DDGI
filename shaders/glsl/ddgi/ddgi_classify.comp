@@ -2,7 +2,65 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
+const uint DDGI_PROBE_STATE_ACTIVE = 0u;
+const uint DDGI_PROBE_STATE_INACTIVE = 1u;
+
+struct DDGIFrameConstants {
+    mat4 view;
+    mat4 projection;
+    vec4 cameraPosition;
+    vec4 volumeOriginAndRays;
+    vec4 probeSpacingAndHysteresis;
+    uvec4 probeCounts;
+    vec4 biasAndDebug;
+    uvec4 atlasLayout;
+};
+
+struct DDGIProbeRayData {
+    vec4 radianceAndDistance;
+    vec4 directionAndDistanceSquared;
+};
+
+layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
+    DDGIFrameConstants constants;
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer ProbeRayDataBuffer {
+    DDGIProbeRayData probeRayData[];
+};
+
+layout(set = 0, binding = 3, std430) buffer ProbeStatesBuffer {
+    uint probeStates[];
+};
+
 void main()
 {
-    // TODO: Classify probes as active or inactive.
+    uint probeIndex = gl_GlobalInvocationID.x;
+    uint probeCount = constants.probeCounts.x * constants.probeCounts.y * constants.probeCounts.z;
+    if (probeIndex >= probeCount) {
+        return;
+    }
+
+    uint raysPerProbe = max(uint(constants.volumeOriginAndRays.w), 1u);
+    float nearGeometryDistance = max(constants.biasAndDebug.z, 0.0);
+    uint nearHitCount = 0u;
+    uint finiteHitCount = 0u;
+    uint rayBaseIndex = probeIndex * raysPerProbe;
+
+    for (uint rayIndex = 0u; rayIndex < raysPerProbe; ++rayIndex) {
+        float hitDistance = probeRayData[rayBaseIndex + rayIndex].radianceAndDistance.w;
+        if (hitDistance < 1.0e20) {
+            finiteHitCount += 1u;
+        }
+        if (hitDistance < nearGeometryDistance) {
+            nearHitCount += 1u;
+        }
+    }
+
+    float nearHitRatio = float(nearHitCount) / float(raysPerProbe);
+    bool mostlyInsideGeometry = nearHitRatio > 0.35;
+    bool neverSeesScene = finiteHitCount == 0u;
+    probeStates[probeIndex] = mostlyInsideGeometry && !neverSeesScene
+        ? DDGI_PROBE_STATE_INACTIVE
+        : DDGI_PROBE_STATE_ACTIVE;
 }

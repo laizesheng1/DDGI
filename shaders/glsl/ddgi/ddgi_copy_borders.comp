@@ -2,7 +2,95 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+struct DDGIFrameConstants {
+    mat4 view;
+    mat4 projection;
+    vec4 cameraPosition;
+    vec4 volumeOriginAndRays;
+    vec4 probeSpacingAndHysteresis;
+    uvec4 probeCounts;
+    vec4 biasAndDebug;
+    uvec4 atlasLayout;
+};
+
+layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
+    DDGIFrameConstants constants;
+};
+
+layout(set = 0, binding = 4, rgba16f) uniform image2D irradianceAtlas;
+layout(set = 0, binding = 5, r32f) uniform image2D depthAtlas;
+layout(set = 0, binding = 6, r32f) uniform image2D depthSquaredAtlas;
+
+bool borderSourceTexel(uvec2 atlasTexel, uint tileSize, uint tileColumns, uint probeCount, out ivec2 dstTexel, out ivec2 srcTexel)
+{
+    uvec2 localTexel = atlasTexel % tileSize;
+    bool isBorder = localTexel.x == 0u || localTexel.y == 0u ||
+        localTexel.x == tileSize - 1u || localTexel.y == tileSize - 1u;
+    if (!isBorder) {
+        return false;
+    }
+
+    uvec2 tileCoord = atlasTexel / tileSize;
+    uint probeIndex = tileCoord.x + tileCoord.y * tileColumns;
+    if (probeIndex >= probeCount) {
+        return false;
+    }
+
+    uvec2 sourceLocalTexel = localTexel;
+    if (localTexel.x == 0u) {
+        sourceLocalTexel.x = tileSize - 2u;
+    } else if (localTexel.x == tileSize - 1u) {
+        sourceLocalTexel.x = 1u;
+    }
+
+    if (localTexel.y == 0u) {
+        sourceLocalTexel.y = tileSize - 2u;
+    } else if (localTexel.y == tileSize - 1u) {
+        sourceLocalTexel.y = 1u;
+    }
+
+    uvec2 tileBase = tileCoord * tileSize;
+    dstTexel = ivec2(atlasTexel);
+    srcTexel = ivec2(tileBase + sourceLocalTexel);
+    return true;
+}
+
+void copyIrradianceBorder(uvec2 atlasTexel, uint probeCount)
+{
+    uvec2 atlasSize = uvec2(imageSize(irradianceAtlas));
+    if (atlasTexel.x >= atlasSize.x || atlasTexel.y >= atlasSize.y) {
+        return;
+    }
+
+    ivec2 dstTexel;
+    ivec2 srcTexel;
+    uint tileSize = constants.atlasLayout.z + 2u;
+    if (borderSourceTexel(atlasTexel, tileSize, constants.atlasLayout.x, probeCount, dstTexel, srcTexel)) {
+        imageStore(irradianceAtlas, dstTexel, imageLoad(irradianceAtlas, srcTexel));
+    }
+}
+
+void copyDepthBorders(uvec2 atlasTexel, uint probeCount)
+{
+    uvec2 atlasSize = uvec2(imageSize(depthAtlas));
+    if (atlasTexel.x >= atlasSize.x || atlasTexel.y >= atlasSize.y) {
+        return;
+    }
+
+    ivec2 dstTexel;
+    ivec2 srcTexel;
+    uint tileSize = constants.atlasLayout.w + 2u;
+    if (borderSourceTexel(atlasTexel, tileSize, constants.atlasLayout.x, probeCount, dstTexel, srcTexel)) {
+        imageStore(depthAtlas, dstTexel, imageLoad(depthAtlas, srcTexel));
+        imageStore(depthSquaredAtlas, dstTexel, imageLoad(depthSquaredAtlas, srcTexel));
+    }
+}
+
 void main()
 {
-    // TODO: Copy probe atlas borders to remove octahedral filtering seams.
+    uint probeCount = constants.probeCounts.x * constants.probeCounts.y * constants.probeCounts.z;
+    uvec2 atlasTexel = gl_GlobalInvocationID.xy;
+
+    copyIrradianceBorder(atlasTexel, probeCount);
+    copyDepthBorders(atlasTexel, probeCount);
 }
