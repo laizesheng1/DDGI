@@ -6,6 +6,7 @@
 namespace debug {
 
 struct DebugUIState {
+    bool enableDdgi{true};
     bool showProbes{true};
     bool showTexturePanel{true};
     ddgi::DebugTexture selectedTexture{ddgi::DebugTexture::Irradiance};

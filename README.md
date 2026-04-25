@@ -1,13 +1,14 @@
 # VK MiniRender DDGI
 
-这是一个基于现有 `src/vulkan_base` 框架扩展的 DDGI 实验工程。项目目标是在不修改基础框架实现的前提下，复用已有的 Vulkan 设备、交换链、命令缓冲、纹理、Buffer、HUD 和 glTF 加载能力，逐步接入 DDGI 所需的 Probe Volume、Ray Tracing、Probe Atlas 更新、Probe Relocation / Classification，以及最终的 lighting gather。
+这是一个基于现有 `src/vulkan_base` 框架扩展的 DDGI 实验工程。当前目标是在不修改基础框架实现的前提下，复用已有的 Vulkan 设备、交换链、命令缓冲、纹理、Buffer、HUD 和 glTF 加载能力，逐步接入 DDGI 所需的 Probe Volume、Ray Tracing、Probe Atlas 更新、Probe Relocation / Classification，以及最终的 lighting gather。
 
 ## 当前约束
 
-1. 不修改已有 `src/vulkan_base` 里的实现。
+1. 不修改已有 `src/vulkan_base` 中的实现。
 2. 复用 `VKM_Base`、`VKMDevice`、`Buffer`、`Texture`、Swapchain、HUD、glTF loader 等已有能力。
 3. DDGI 相关的新 Vulkan 封装放在 `include/rt`、`src/rt`、`include/ddgi`、`src/ddgi`、`include/renderer`、`src/renderer` 中。
-4. 如果确实需要 helper，优先写在 DDGI/RT 模块内部，不把 DDGI 逻辑塞进 `vulkan_base`。
+4. 如果确实需要 helper，优先写在 DDGI / RT / Renderer 模块内部，不把 DDGI 逻辑塞进 `vulkan_base`。
+5. 后续所有新增代码都应增加必要注释，尤其是同步、Barrier、AS 构建、SBT、Descriptor 绑定和 Pass 串联逻辑。
 
 ## 参考资料
 
@@ -19,7 +20,7 @@
 
 ## 构建和 Shader 生成
 
-顶层 `CMakeLists.txt` 已支持在构建时用 `glslc` 编译以下 shader 类型：
+顶层 `CMakeLists.txt` 已支持在构建时使用 `glslc` 编译以下 shader 类型：
 
 ```cmake
 file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS
@@ -52,15 +53,26 @@ shaders/glsl/ddgi/ddgi_update_irradiance.comp.spv
 | `assets/` | 场景、纹理和 DDGI 默认配置。 |
 | `external/` | 第三方依赖。 |
 
-## 当前已完成的内容
+## 当前已经完成的功能
 
-下面这些功能已经在代码中落地，不再是纯骨架：
+下面这些内容已经在代码中落地，不再是纯骨架。
 
-### 1. 应用层和帧录制顺序已接通
+### 1. 应用层初始化和帧录制顺序
 
-- `DDGISample::prepare()` 会创建 RT 上下文、加载 Sponza、构建场景元数据、创建 Renderer、DDGI Volume、SDF Volume 和调试 UI。
-- `DDGISample::getEnabledExtensions()` 已能检查并启用 `VK_KHR_acceleration_structure`、`VK_KHR_ray_tracing_pipeline`、`VK_KHR_buffer_device_address` 等扩展和 feature chain。
-- `DDGISample::recordFrame()` 已修正为：
+- `DDGISample::prepare()` 已完成以下流程：
+  - 创建 `RayTracingContext`
+  - 加载 `Sponza`
+  - 构建场景 RT 数据
+  - 创建 `Renderer`
+  - 创建 `DDGIVolume`
+  - 创建 `SDFVolume`
+  - 创建 `ProbeVisualizer` / `TextureVisualizer`
+- `DDGISample::getEnabledExtensions()` 已能检查并启用：
+  - `VK_KHR_acceleration_structure`
+  - `VK_KHR_ray_tracing_pipeline`
+  - `VK_KHR_buffer_device_address`
+  - 以及对应的 feature chain
+- `DDGISample::recordFrame()` 已修正为正确的命令录制顺序：
   1. `commandBuffer.begin()`
   2. `ddgiVolume.updateConstants()`
   3. `ddgiVolume.updateProbesFromSDF()`
@@ -68,29 +80,94 @@ shaders/glsl/ddgi/ddgi_update_irradiance.comp.spv
   5. `ddgiVolume.updateProbes()`
   6. `beginRenderPass()`
   7. `renderer.drawScene()`
-  8. Debug UI / Debug draw
+  8. Debug 绘制 / UI
   9. `endRenderPass()`
   10. `commandBuffer.end()`
 
-这部分已经从 README 之前描述的“待修正”状态变成了已完成。
+这部分已经不是 TODO，命令录制位置和大体帧流程都已经接通。
 
-### 2. Scene 已能加载并扁平化基础场景信息
+### 2. 场景加载和 Scene 数据整理
 
-- `Scene::loadFromFile()` 已加载 Sponza。
-- glTF primitive 已被整理成 `SceneMesh` 列表。
-- 每个 `SceneMesh` 已包含 `firstIndex`、`indexCount`、`firstVertex`、`vertexCount`、`materialIndex`、包围盒和中心点。
-- `SceneGpuData::create()` 已复用 glTF loader 生成的 GPU vertex/index buffer，避免第一阶段重复拷贝场景几何。
+- `Scene::loadFromFile()` 已能加载 Sponza。
+- glTF primitive 已整理成 `SceneMesh` 列表。
+- 每个 `SceneMesh` 已包含：
+  - `firstIndex`
+  - `indexCount`
+  - `firstVertex`
+  - `vertexCount`
+  - `materialIndex`
+  - 包围盒
+  - 中心点
+- `Scene` 现在还会保存源 glTF 路径，供 `SceneGpuData` 重新解析生成 RT 兼容几何。
 
-### 3. RT 支持检测和基础上下文已完成
+### 3. RT 专用 SceneGpuData 已完成第一版
 
-- `RayTracingContext::querySupport()` 已完整检查所需扩展、feature 和 property。
-- `RayTracingContext::create()` 已缓存设备支持信息，并初始化 Vulkan-Hpp 默认 dispatcher。
-- `RayTracingContext::buildScene()` 已接入 CPU `SoftwareBvh` 的构建路径，作为 bring-up 阶段的辅助结构。
-- `ShaderBindingTable::create()` 已记录 SBT 需要的 `handleSize` 和 `handleStride`，为后续真正填充 shader group handle 做准备。
+`SceneGpuData` 不再只是复用 glTF 原始 buffer，而是已经实现了第一版 RT 专用紧凑几何布局：
 
-### 4. DDGI 资源已真正创建
+- 重新解析 glTF，按 primitive 生成 RT 兼容的紧凑 `positions / indices / meshes`
+- 创建带以下 usage 的 RT 顶点/索引 buffer：
+  - `eStorageBuffer`
+  - `eShaderDeviceAddress`
+  - `eAccelerationStructureBuildInputReadOnlyKHR`
+- 保存了：
+  - `vk::DescriptorBufferInfo`
+  - `vk::DeviceAddress`
+  - `compactMeshes`
+  - `compactPositions`
+  - `compactIndices`
 
-`DDGIResources` 不再只是计算尺寸，已经完成了以下内容：
+这意味着 BLAS/TLAS 构建已经有了真正可用的输入数据。
+
+### 4. RT 能力检测与上下文
+
+`RayTracingContext` 已完成：
+
+- 扩展、feature、property 检查
+- `VULKAN_HPP_DEFAULT_DISPATCHER` 初始化
+- CPU `SoftwareBvh` 构建
+- `SceneGpuData` 创建
+- `AccelerationStructureBuilder` 创建
+- `buildScene()` 中调用 RT 场景构建流程
+- `sceneBinding()` 返回：
+  - `Scene*`
+  - `SceneGpuData*`
+  - `TLAS handle`
+
+当前 `RayTracingScene::topLevelAccelerationStructure` 已不再固定为空，而是会在 RT 数据构建成功后返回真实 TLAS。
+
+### 5. BLAS / TLAS 构建已经接通
+
+`AccelerationStructureBuilder` 现在已经实现：
+
+- 为每个 `SceneMesh` 构建一个 BLAS
+- 生成 scratch buffer
+- 为所有 BLAS 构建 TLAS
+- 创建 AS buffer
+- 查询 AS device address
+- 使用一次性命令缓冲提交构建
+- 构建间插入 AS build barrier
+
+当前已经能输出类似“Built N BLAS objects and one TLAS” 的日志，说明 RT 场景加速结构已经不再是空壳。
+
+### 6. Shader Binding Table 已创建
+
+`ShaderBindingTable` 当前已经实现：
+
+- 从 RT pipeline 读取 shader group handles
+- 根据：
+  - `shaderGroupHandleSize`
+  - `shaderGroupHandleAlignment`
+  - `shaderGroupBaseAlignment`
+  计算记录布局
+- 创建带 `eShaderBindingTableKHR | eShaderDeviceAddress` usage 的 SBT buffer
+- 填充 raygen / miss / hit 三类记录
+- 输出 `vk::StridedDeviceAddressRegionKHR`
+
+因此，DDGI 的 RT trace 路径已经具备了真正调用 `vkCmdTraceRaysKHR` 的前置条件。
+
+### 7. DDGI 资源已经真正创建
+
+`DDGIResources` 已经完成：
 
 - 创建 `irradiance` atlas
 - 创建 `depth` atlas
@@ -102,8 +179,8 @@ shaders/glsl/ddgi/ddgi_update_irradiance.comp.spv
 - 创建 `DescriptorSetLayout`
 - 创建 `DescriptorPool`
 - 分配并更新 `DescriptorSet`
-- 记录 atlas 的初始 layout transition barrier
-- 记录 probe ray 数据读屏障
+- 记录 atlas 初始 layout transition barrier
+- 记录 probe ray 读屏障
 - 记录 atlas 写后读/写屏障
 
 当前资源绑定布局：
@@ -118,13 +195,13 @@ shaders/glsl/ddgi/ddgi_update_irradiance.comp.spv
 | `5` | Depth atlas storage image |
 | `6` | DepthSquared atlas storage image |
 
-### 5. DDGI 管线已创建
+### 8. DDGI Pipeline 已完成第一版
 
-`DDGIPipeline` 已经能够：
+`DDGIPipeline` 当前已能创建：
 
-- 创建 DDGI descriptor set layout 对应的 pipeline layout
-- 在支持 RT 时创建额外的 TLAS descriptor set layout
-- 创建以下 compute pipeline：
+- DDGI compute pipeline layout
+- RT scene descriptor set layout
+- 以下 compute pipeline：
   - `ddgi_update_irradiance.comp`
   - `ddgi_update_depth.comp`
   - `ddgi_update_depth_squared.comp`
@@ -132,136 +209,179 @@ shaders/glsl/ddgi/ddgi_update_irradiance.comp.spv
   - `ddgi_relocate.comp`
   - `ddgi_classify.comp`
   - `ddgi_sdf_probe_update.comp`
-- 创建 RT pipeline：
+- RT pipeline：
   - `ddgi_trace.rgen`
   - `ddgi_trace.rmiss`
   - `ddgi_trace.rchit`
 
-### 6. DDGI Volume 已能录制完整的 compute 更新链
+### 9. DDGI trace 和 probe update 已接通
 
-`DDGIVolume` 当前已完成：
+`DDGIVolume` 当前已经实现：
 
 - 每帧更新 `DDGIFrameConstants`
-- 上传 constants 到 GPU
-- 录制 SDF probe update compute dispatch
-- 录制 classification compute dispatch
-- 录制 relocation compute dispatch
-- 录制 irradiance / depth / depthSquared atlas update dispatch
-- 录制 atlas border copy dispatch
-- 为 lighting pass 绑定 DDGI descriptor set
+- 上传 constants
+- 创建 RT scene descriptor set
+- 创建 SBT
+- 在 `traceProbeRays()` 中：
+  - 绑定 RT pipeline
+  - 绑定 DDGI descriptor set
+  - 绑定 TLAS descriptor set
+  - 调用 `vkCmdTraceRaysKHR`
+- 在 `updateProbes()` 中：
+  - 录制 classify
+  - 录制 relocate
+  - 录制 irradiance atlas update
+  - 录制 depth atlas update
+  - 录制 depthSquared atlas update
+  - 录制 copy borders
+- 在 `updateProbesFromSDF()` 中录制 SDF metadata 更新
+- 在 `bindForLighting()` 中绑定 DDGI descriptor set
 
-其中 `traceProbeRays()` 仍保留了 RT 命令位置，但真正的 `vkCmdTraceRaysKHR` 还没有接上 SBT 和 TLAS。
+换句话说，DDGI 的“Probe Ray Tracing -> Probe Update”这一条核心链路已经具备了第一版完整命令录制能力。
 
-### 7. DDGI 公共 shader 辅助函数已基本成形
+### 10. DDGI 公共 shader 和 probe update shader 已有第一版实现
 
-`shaders/glsl/common/ddgi_common.glsl` 已经实现：
+`shaders/glsl/common/ddgi_common.glsl` 已实现：
 
-- `ddgiProbeIndex()`
-- `ddgiProbeCoord()`
-- `ddgiOctEncode()` / `ddgiOctDecode()`
-- `ddgiAtlasTileCoord()` / `ddgiAtlasInteriorTexel()`
-- `ddgiOctTexelDirection()`
-- `ddgiFibonacciDirection()`
-- `ddgiProbeWorldPosition()`
-- `ddgiApplySurfaceBias()`
+- probe index / probe coord 映射
+- oct encode / decode
+- atlas interior texel 映射
+- Fibonacci ray direction
+- probe world position
+- surface bias
 
-这意味着 probe index、atlas texel 映射、oct 编解码和 ray direction 的基础数学函数已经可用。
-
-### 8. 多个 DDGI compute shader 已具备第一版逻辑
-
-以下 shader 不再是空壳：
+以下 compute shader 已具备第一版逻辑：
 
 - `ddgi_update_irradiance.comp`
-  - 遍历 probe ray data
-  - 用 cosine 权重累积 radiance
-  - 使用 hysteresis 与旧值混合
 - `ddgi_update_depth.comp`
-  - 用 cosine-power 权重累积 mean distance
 - `ddgi_update_depth_squared.comp`
-  - 累积 mean squared distance
 - `ddgi_copy_borders.comp`
-  - 复制 oct tile 的边界 texel
 - `ddgi_relocate.comp`
-  - 根据近距离命中结果调整 probe offset
 - `ddgi_classify.comp`
-  - 根据近距离命中比例标记 active/inactive
 - `ddgi_sdf_probe_update.comp`
-  - 当前先做 offset clamp 和 active 状态维护，等待真实 SDF 纹理接入
 
-### 9. RT shader 已具备第一版可运行逻辑
+### 11. RT shader 已具备第一版逻辑
 
-以下 RT shader 已不再是 TODO：
+以下 RT shader 已不再是空实现：
 
 - `ddgi_trace.rgen`
   - 计算 `(probeIndex, rayIndex)`
-  - 由 probe index 恢复 probe 坐标
-  - 结合 probe offset 计算 ray origin
-  - 使用 Fibonacci 方向发射 ray
-  - 预留 payload 写回 `probeRayData`
+  - 计算 probe origin
+  - 应用 probe offset
+  - 使用 Fibonacci direction 发射 ray
+  - 将结果写入 `probeRayData`
 - `ddgi_trace.rmiss`
-  - 输出天空颜色和无限远距离
+  - 写天空颜色和无限远距离
 - `ddgi_trace.rchit`
-  - 输出稳定的几何相关 debug radiance
-  - 写回 hit distance 和 squared distance
+  - 写 hit radiance
+  - 写 hit distance
+  - 写 distance squared
 
-虽然 RT pipeline 和 shader 都已建立，但真正的 trace path 还差 TLAS 和 SBT 接通。
+### 12. Renderer 已有 forward fallback
 
-### 10. Forward Renderer 已能显示场景
+当前 `Renderer` 已完成一条前向渲染 fallback 路径：
 
-`Renderer` 当前已经不是空实现：
-
-- 创建了基于 `forward_scene.vert/frag` 的前向渲染 pipeline
+- 创建了基于 `forward_scene.vert / forward_scene.frag` 的 graphics pipeline
 - 复用了 glTF material descriptor layout
-- 使用 push constant 传入 view-projection
+- 使用 push constant 传入相机的 view-projection
 - 能绘制 opaque 和 alpha-masked glTF 节点
 
-这让项目已经具备“先看到场景，再继续接 DDGI lighting”的基础。
+这意味着项目已经能显示场景，但这条路径目前还不是“真正看到 DDGI 效果”的最终渲染路径。
 
-### 11. Debug UI 已能控制显示开关
+### 13. Debug UI 已经可用
 
-`DebugUI` 已经接上 HUD，支持：
+`DebugUI` 已接入 HUD，支持：
 
 - `Show probes`
 - `Show texture panel`
-- 选择 `Irradiance / Depth / Depth squared`
+- `Irradiance / Depth / Depth squared` 选择
 
-## 当前仍未完成的内容
+## 当前还没有完成的部分
 
-下面这些是下一阶段要接上的关键部分：
+虽然 RT trace 和 probe update 已经接上，但“最终看到 DDGI 效果”还没有完成，原因主要在渲染 Pass 这一侧。
 
-1. `AccelerationStructureBuilder` 还没有真正构建 BLAS / TLAS。
-2. `ShaderBindingTable` 还没有向 GPU buffer 写入 shader group handle。
-3. `DDGIVolume::traceProbeRays()` 还没有真正调用 `vkCmdTraceRaysKHR`。
-4. `RayTracingScene::topLevelAccelerationStructure` 仍然是空句柄。
-5. `LightingPass` 还没有接入 renderer 主路径。
-6. `ddgi_lighting.frag` 虽然已经实现了 probe 查询和 Chebyshev visibility 权重函数，但当前 `main()` 还没有接到真实的 GBuffer/world position/normal 输入。
-7. `ProbeVisualizer` 仍未绘制 probe。
-8. `TextureVisualizer` 仍未绘制 atlas 面板。
-9. `SDFVolume` 还没有真正创建 SDF 纹理或 brick atlas。
-10. `SceneGpuData` 目前只复用 glTF buffer，还没有为 RT/closest-hit shading 生成真正紧凑的 storage-buffer 结构。
+### 1. GBufferPass 仍然是空实现
+
+`GBufferPass::record()` 目前还是 TODO。  
+这意味着：
+
+- 还没有输出 world position / normal / albedo / roughness / metallic / depth
+- `ddgi_lighting.frag` 还没有真实输入来源
+
+### 2. LightingPass 仍然是空实现
+
+`LightingPass::record()` 目前还是 TODO。  
+这意味着：
+
+- 还没有 fullscreen lighting pass
+- 还没有把 `ddgi_lighting.frag` 真正用于最终 shading
+- 还没有把 DDGI atlas 贡献到屏幕上的最终颜色
+
+### 3. Renderer 还没有组织多 Pass
+
+当前 `Renderer` 只做了一条 forward fallback 路径，没有真正组织：
+
+- `GBufferPass`
+- `LightingPass`
+- `ForwardScenePass`
+
+所以当前虽然 DDGI probe tracing 和 atlas 更新已经能执行，但最终画面仍然只是 forward 场景渲染，不是完整的 DDGI lighting 结果。
+
+### 4. ddgi_lighting.frag 只完成了查询函数，没有完成主路径接线
+
+`ddgi_lighting.frag` 已经写好了：
+
+- probe cage 查询
+- trilinear weight
+- normal / backface weight
+- Chebyshev visibility weight
+- irradiance atlas 加权采样
+
+但当前 `main()` 仍然是占位，因为没有来自 GBuffer 的：
+
+- world position
+- world normal
+- albedo
+- view direction
+
+### 5. ProbeVisualizer / TextureVisualizer 仍未真正绘制
+
+当前这两个模块只有 create / destroy 骨架，还没有真正画出：
+
+- probe 位置 / active-inactive 状态
+- irradiance / depth / depthSquared atlas 面板
+
+这会影响 DDGI bring-up 的可验证性，因为 probe atlas 更新后还没有直观可视化输出。
+
+### 6. SDFVolume 仍然是占位实现
+
+`SDFVolume` 还没有创建真实 3D texture 或 brick atlas。  
+当前 `ddgi_sdf_probe_update.comp` 仍然只是对 probe offset / state 做保护性 clamp，而不是真正基于 SDF 采样推进 probe。
 
 ## 当前模块状态
 
 | 模块 | 当前状态 | 说明 |
 |---|---|---|
 | `Scene` | 已完成第一阶段 | 能加载 Sponza 并扁平化 primitive 信息。 |
-| `SceneGpuData` | 部分完成 | 已复用 glTF GPU buffer，但还未生成 RT 专用紧凑场景数据。 |
-| `RayTracingContext` | 部分完成 | 已检查扩展/特性并初始化 RT 支持信息。 |
-| `AccelerationStructureBuilder` | 未完成 | 只实现了资源生命周期和 reset 骨架。 |
-| `ShaderBindingTable` | 部分完成 | 已计算对齐参数，但未分配/填充 raygen/miss/hit 数据。 |
+| `SceneGpuData` | 已完成第一阶段 | 已创建 RT 兼容的紧凑顶点/索引 buffer。 |
+| `RayTracingContext` | 已完成第一阶段 | 已完成扩展检测、SceneGpuData 创建、BLAS/TLAS 构建接入。 |
+| `AccelerationStructureBuilder` | 已完成第一阶段 | 已能构建 BLAS / TLAS。 |
+| `ShaderBindingTable` | 已完成第一阶段 | 已能创建并填充 raygen / miss / hit 记录。 |
 | `DDGIResources` | 已完成第一阶段 | 资源、descriptor、barrier 已建立。 |
 | `DDGIPipeline` | 已完成第一阶段 | Compute pipeline 和 RT pipeline 已创建。 |
-| `DDGIVolume` | 部分完成 | Compute 更新链已可录制，RT trace 尚未真正发射。 |
-| `Renderer` | 已完成第一阶段 | Forward scene pass 已可绘制场景。 |
-| `LightingPass` | 未完成 | 未接入主渲染路径。 |
-| `ProbeVisualizer` | 未完成 | 只有 create/destroy 骨架。 |
-| `TextureVisualizer` | 未完成 | 只有 create/destroy 骨架。 |
-| `DebugUI` | 已完成 | HUD 调试开关已可用。 |
-| `SDFVolume` | 未完成 | 只有占位结构。 |
+| `DDGIVolume` | 已完成第一阶段 | trace + classify + relocate + atlas update 已可录制。 |
+| `Renderer` | 部分完成 | 只有 forward fallback，尚未组织 GBuffer / Lighting pass。 |
+| `GBufferPass` | 未完成 | 仍是 TODO。 |
+| `LightingPass` | 未完成 | 仍是 TODO。 |
+| `ForwardScenePass` | 未完成 | 独立 pass 类仍是 TODO，实际功能暂时合并在 `Renderer` 中。 |
+| `ProbeVisualizer` | 未完成 | 只有骨架。 |
+| `TextureVisualizer` | 未完成 | 只有骨架。 |
+| `DebugUI` | 已完成 | HUD 调试开关可用。 |
+| `SDFVolume` | 未完成 | 仍为占位结构。 |
 
-## 当前帧流程
+## 当前真实帧流程
 
-当前代码实际帧流程如下：
+当前代码实际执行的帧流程如下：
 
 ```text
 commandBuffer.begin()
@@ -281,7 +401,33 @@ endRenderPass()
 commandBuffer.end()
 ```
 
-注意：虽然流程位置已经对，但 `traceProbeRays()` 目前仍会因为 TLAS 为空而直接返回，所以现在真正发生的是 SDF + classify + relocate + atlas update + forward scene draw。
+需要注意：
+
+1. RT trace 和 probe atlas update 已经会执行。
+2. 但最终屏幕颜色仍主要来自 forward 场景绘制。
+3. 也就是说，当前代码已经具备“DDGI 数据被更新”的基础，但还没有具备“DDGI 被用于最终渲染结果”的完整 pass 链。
+
+## 当前为什么还没有达到 DDGI 最终效果
+
+要真正看到 DDGI 效果，必须同时满足两件事：
+
+1. Probe 数据要更新成功  
+当前这一步已经基本具备：
+  - RT trace 已能发射
+  - probe atlas update 已能执行
+
+2. 最终 shading 要查询 DDGI  
+当前这一步还没接通：
+  - `GBufferPass` 没有输出 surface 数据
+  - `LightingPass` 没有驱动 fullscreen lighting
+  - `ddgi_lighting.frag` 没有接上真实输入
+
+因此当前项目处于：
+
+```text
+DDGI 数据更新链已经具备
+最终 DDGI 画面输出链还没有完成
+```
 
 ## 默认 DDGI 配置
 
@@ -304,13 +450,34 @@ commandBuffer.end()
 
 默认 probe 数量为 `9 * 5 * 9 = 405`，默认 ray 数量为 `405 * 128 = 51840`。
 
-## 下一阶段建议
+## 下一阶段实现重点
 
-下一步最值得投入的是把 RT trace 真正打通，而不是继续扩展更多外围模块。推荐顺序：
+下一步的目标不再只是“让 DDGI 数据更新”，而是要让项目真正达到 DDGI 的可见效果。  
+因此下一阶段重点应转向渲染 Pass 的补全：
 
-1. 完成 `SceneGpuData` 的 RT 可访问几何布局。
-2. 完成 `AccelerationStructureBuilder` 的 BLAS / TLAS 构建。
-3. 完成 `ShaderBindingTable` buffer 创建和 shader group handle 填充。
-4. 在 `DDGIVolume::traceProbeRays()` 中真正调用 `vkCmdTraceRaysKHR`。
-5. 用 atlas 和 debug panel 验证 probe ray hit / miss 是否生效。
-6. 再把 `ddgi_lighting.frag` 接进真正的 lighting pass。
+1. 补全 `GBufferPass`
+   - 输出 world position
+   - 输出 world normal
+   - 输出 albedo
+   - 输出 roughness / metallic
+   - 输出 depth
+
+2. 补全 `LightingPass`
+   - fullscreen pass
+   - 绑定 DDGI atlas
+   - 接入 `ddgi_lighting.frag`
+   - 从 GBuffer 读取 surface 输入并输出最终颜色
+
+3. 改造 `Renderer`
+   - 不再只调用 forward fallback
+   - 正式组织 `GBufferPass -> LightingPass`
+   - 保留 `ForwardScenePass` 作为早期 fallback 或调试路径
+
+4. 补全 Debug 可视化
+   - `ProbeVisualizer`：画 probe 状态
+   - `TextureVisualizer`：画 atlas 面板
+
+5. 所有新增代码必须增加注释
+   - Pass 之间资源流转要有注释
+   - Barrier 和 layout transition 要有注释
+   - GBuffer / Lighting 输入输出关系要有注释

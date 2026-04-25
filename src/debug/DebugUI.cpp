@@ -9,6 +9,7 @@ void DebugUI::draw(vkm::HUD* ui, DebugUIState& state)
     }
 
     if (ui->header("DDGI Debug")) {
+        ui->checkBox("Enable DDGI", &state.enableDdgi);
         ui->checkBox("Show probes", &state.showProbes);
         ui->checkBox("Show texture panel", &state.showTexturePanel);
 

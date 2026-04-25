@@ -74,7 +74,12 @@ std::array<vk::VertexInputAttributeDescription, 4> sceneVertexAttributes()
 
 } // namespace
 
-void Renderer::create(vkm::VKMDevice* inDevice, vk::PipelineCache pipelineCache, vk::RenderPass renderPass)
+void Renderer::create(vkm::VKMDevice* inDevice,
+                      vk::PipelineCache pipelineCache,
+                      vk::RenderPass renderPass,
+                      vk::Format depthFormat,
+                      vk::Extent2D inFramebufferExtent,
+                      vk::DescriptorSetLayout ddgiSetLayout)
 {
     destroy();
     if (inDevice == nullptr) {
@@ -87,6 +92,10 @@ void Renderer::create(vkm::VKMDevice* inDevice, vk::PipelineCache pipelineCache,
     }
 
     device = inDevice;
+    framebufferExtent = inFramebufferExtent;
+
+    gbufferPass.create(device, pipelineCache, framebufferExtent, depthFormat);
+    lightingPass.create(device, pipelineCache, renderPass, ddgiSetLayout);
 
     vk::PushConstantRange pushConstantRange{};
     pushConstantRange.setStageFlags(vk::ShaderStageFlagBits::eVertex)
@@ -201,6 +210,9 @@ void Renderer::destroy()
         return;
     }
 
+    lightingPass.destroy();
+    gbufferPass.destroy();
+
     if (forwardPipeline) {
         device->logicalDevice.destroyPipeline(forwardPipeline);
     }
@@ -209,15 +221,33 @@ void Renderer::destroy()
     }
     forwardPipeline = VK_NULL_HANDLE;
     forwardPipelineLayout = VK_NULL_HANDLE;
+    framebufferExtent = vk::Extent2D{};
     device = nullptr;
+}
+
+void Renderer::recordGBuffer(vk::CommandBuffer commandBuffer,
+                             scene::Scene& scene,
+                             const Camera& camera,
+                             vk::Extent2D inFramebufferExtent)
+{
+    if (!gbufferPass.isCreated() || !lightingPass.isCreated()) {
+        return;
+    }
+    gbufferPass.record(commandBuffer, scene, camera, inFramebufferExtent);
 }
 
 void Renderer::drawScene(vk::CommandBuffer commandBuffer,
                          scene::Scene& scene,
                          const Camera& camera,
-                         vk::Extent2D framebufferExtent,
-                         const ddgi::DDGIVolume*)
+                         vk::Extent2D inFramebufferExtent,
+                         const ddgi::DDGIVolume* volume,
+                         bool enableDdgi)
 {
+    if (lightingPass.isCreated() && gbufferPass.isCreated() && volume != nullptr) {
+        lightingPass.record(commandBuffer, gbufferPass, camera, *volume, inFramebufferExtent, enableDdgi);
+        return;
+    }
+
     if (forwardPipeline == VK_NULL_HANDLE || forwardPipelineLayout == VK_NULL_HANDLE) {
         return;
     }
@@ -225,13 +255,13 @@ void Renderer::drawScene(vk::CommandBuffer commandBuffer,
     vk::Viewport viewport{};
     viewport.setX(0.0f)
         .setY(0.0f)
-        .setWidth(static_cast<float>(framebufferExtent.width))
-        .setHeight(static_cast<float>(framebufferExtent.height))
+        .setWidth(static_cast<float>(inFramebufferExtent.width))
+        .setHeight(static_cast<float>(inFramebufferExtent.height))
         .setMinDepth(0.0f)
         .setMaxDepth(1.0f);
     vk::Rect2D scissor{};
     scissor.setOffset(vk::Offset2D{0, 0})
-        .setExtent(framebufferExtent);
+        .setExtent(inFramebufferExtent);
 
     commandBuffer.setViewport(0, viewport);
     commandBuffer.setScissor(0, scissor);

@@ -35,10 +35,15 @@ void DDGISample::prepare()
                   sponzaScenePath,
                   static_cast<uint32_t>(scene.meshes().size()));
 
-    renderer.create(VKMDevice, pipelineCache, renderPass);
-
     ddgi::DDGIVolumeDesc volumeDesc{};
     ddgiVolume.create(VKMDevice, pipelineCache, volumeDesc);
+    renderer.create(
+        VKMDevice,
+        pipelineCache,
+        renderPass,
+        depthFormat,
+        vk::Extent2D{width, height},
+        ddgiVolume.resources().descriptorSetLayout());
 
     sdf::SDFVolumeDesc sdfDesc{};
     sdfVolume.create(VKMDevice, sdfDesc);
@@ -125,14 +130,22 @@ void DDGISample::recordFrame(vk::CommandBuffer commandBuffer)
         .setRenderArea(renderArea)
         .setClearValues(clearValues);
 
+    renderer.recordGBuffer(commandBuffer, scene, displayWindows.camera, vk::Extent2D{width, height});
+
     commandBuffer.beginRenderPass(renderPassBeginInfo, vk::SubpassContents::eInline);
-    renderer.drawScene(commandBuffer, scene, displayWindows.camera, vk::Extent2D{width, height}, &ddgiVolume);
+    renderer.drawScene(
+        commandBuffer,
+        scene,
+        displayWindows.camera,
+        vk::Extent2D{width, height},
+        &ddgiVolume,
+        debugState.enableDdgi);
 
     if (debugState.showProbes) {
-        probeVisualizer.draw(commandBuffer, ddgiVolume);
+        probeVisualizer.draw(commandBuffer, ddgiVolume, displayWindows.camera, vk::Extent2D{width, height});
     }
     if (debugState.showTexturePanel) {
-        textureVisualizer.draw(commandBuffer, ddgiVolume, debugState.selectedTexture);
+        textureVisualizer.draw(commandBuffer, ddgiVolume, debugState.selectedTexture, vk::Extent2D{width, height});
     }
 
     drawUI(commandBuffer);

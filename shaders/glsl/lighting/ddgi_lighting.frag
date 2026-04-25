@@ -3,7 +3,20 @@
 
 #include "../common/ddgi_common.glsl"
 
+layout(location = 0) in vec2 inUV;
 layout(location = 0) out vec4 outColor;
+
+layout(set = 0, binding = 0) uniform sampler2D gbufferWorldPosition;
+layout(set = 0, binding = 1) uniform sampler2D gbufferNormal;
+layout(set = 0, binding = 2) uniform sampler2D gbufferAlbedo;
+layout(set = 0, binding = 3) uniform sampler2D gbufferMaterial;
+layout(set = 0, binding = 4) uniform sampler2D gbufferDepth;
+
+layout(push_constant) uniform LightingPushConstants {
+    vec4 cameraPosition;
+    vec4 lightDirectionAndIntensity;
+    vec4 options;
+} pushConstants;
 
 struct DDGIFrameConstants {
     mat4 view;
@@ -16,13 +29,13 @@ struct DDGIFrameConstants {
     uvec4 atlasLayout;
 };
 
-layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
+layout(set = 1, binding = 0) uniform DDGIConstantsBuffer {
     DDGIFrameConstants constants;
 };
 
-layout(set = 0, binding = 4, rgba16f) readonly uniform image2D irradianceAtlas;
-layout(set = 0, binding = 5, r32f) readonly uniform image2D depthAtlas;
-layout(set = 0, binding = 6, r32f) readonly uniform image2D depthSquaredAtlas;
+layout(set = 1, binding = 4, rgba16f) readonly uniform image2D irradianceAtlas;
+layout(set = 1, binding = 5, r32f) readonly uniform image2D depthAtlas;
+layout(set = 1, binding = 6, r32f) readonly uniform image2D depthSquaredAtlas;
 
 float ddgiLoadDepthMoment(uint probeIndex, vec3 probeToSurfaceDirection, bool squaredMoment)
 {
@@ -106,8 +119,28 @@ vec3 ddgiQueryIndirectDiffuse(vec3 surfacePositionWorld, vec3 surfaceNormalWorld
 
 void main()
 {
-    // The renderer does not yet provide GBuffer world position/normal inputs to
-    // this pass. Keep the shader compilable and place the complete DDGI query
-    // above so wiring the actual lighting pass is a descriptor/input task next.
-    outColor = vec4(0.0, 0.0, 0.0, 1.0);
+    float depth = texture(gbufferDepth, inUV).r;
+    if (depth >= 0.999999) {
+        outColor = vec4(0.02, 0.025, 0.03, 1.0);
+        return;
+    }
+
+    vec3 surfacePositionWorld = texture(gbufferWorldPosition, inUV).xyz;
+    vec3 surfaceNormalWorld = normalize(texture(gbufferNormal, inUV).xyz);
+    vec3 albedo = texture(gbufferAlbedo, inUV).rgb;
+    vec2 roughnessMetallic = texture(gbufferMaterial, inUV).rg;
+    vec3 viewDirectionWorld = normalize(pushConstants.cameraPosition.xyz - surfacePositionWorld);
+    vec3 lightDirectionWorld = normalize(pushConstants.lightDirectionAndIntensity.xyz);
+
+    float directNdL = max(dot(surfaceNormalWorld, lightDirectionWorld), 0.0);
+    vec3 directDiffuse = albedo * directNdL * pushConstants.lightDirectionAndIntensity.w;
+
+    vec3 indirectIrradiance = pushConstants.options.x > 0.5
+        ? ddgiQueryIndirectDiffuse(surfacePositionWorld, surfaceNormalWorld, viewDirectionWorld)
+        : vec3(0.0);
+    vec3 indirectDiffuse = indirectIrradiance * albedo * (pushConstants.options.y / DDGI_PI);
+
+    vec3 ambient = albedo * mix(0.04, 0.02, roughnessMetallic.x);
+    vec3 finalColor = ambient + directDiffuse + indirectDiffuse;
+    outColor = vec4(finalColor, 1.0);
 }
