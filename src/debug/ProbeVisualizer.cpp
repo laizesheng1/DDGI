@@ -1,18 +1,20 @@
 #include "debug/ProbeVisualizer.h"
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
+
+#include <glm/gtc/constants.hpp>
 
 namespace debug {
 namespace {
 
 struct ProbeDebugPushConstants {
     glm::mat4 viewProjection{1.0f};
-    glm::vec4 volumeOriginAndSize{0.0f};
-    glm::vec4 probeSpacing{0.0f};
-    glm::uvec4 probeCounts{0u};
 };
 
 std::string shaderPath(const char* relativePath)
@@ -62,6 +64,65 @@ vk::PipelineShaderStageCreateInfo makeStage(vk::ShaderModule shaderModule, vk::S
     return shaderStage;
 }
 
+void prepareBufferForCreate(vkm::Buffer& buffer,
+                            vk::BufferUsageFlags usageFlags,
+                            vk::MemoryPropertyFlags memoryPropertyFlags)
+{
+    buffer.usageFlags = usageFlags;
+    buffer.memoryPropertyFlags = memoryPropertyFlags;
+}
+
+void createBuffer(vkm::VKMDevice& device,
+                  vkm::Buffer& buffer,
+                  vk::DeviceSize sizeBytes,
+                  vk::BufferUsageFlags usageFlags,
+                  vk::MemoryPropertyFlags memoryPropertyFlags,
+                  void* initialData)
+{
+    prepareBufferForCreate(buffer, usageFlags, memoryPropertyFlags);
+    buffer.createBuffer(sizeBytes, usageFlags, memoryPropertyFlags, initialData, &device);
+    buffer.setupDescriptor(sizeBytes);
+}
+
+void appendSphereMesh(std::vector<ProbeVisualizerSphereVertex>& vertices,
+                      std::vector<uint32_t>& indices,
+                      uint32_t latitudeSegments,
+                      uint32_t longitudeSegments)
+{
+    vertices.clear();
+    indices.clear();
+
+    for (uint32_t latitude = 0; latitude <= latitudeSegments; ++latitude) {
+        const float v = static_cast<float>(latitude) / static_cast<float>(latitudeSegments);
+        const float phi = v * glm::pi<float>();
+        for (uint32_t longitude = 0; longitude <= longitudeSegments; ++longitude) {
+            const float u = static_cast<float>(longitude) / static_cast<float>(longitudeSegments);
+            const float theta = u * glm::two_pi<float>();
+            const glm::vec3 normal(
+                std::sin(phi) * std::cos(theta),
+                std::cos(phi),
+                std::sin(phi) * std::sin(theta));
+            vertices.push_back({normal, normal});
+        }
+    }
+
+    const uint32_t ringVertexCount = longitudeSegments + 1u;
+    for (uint32_t latitude = 0; latitude < latitudeSegments; ++latitude) {
+        for (uint32_t longitude = 0; longitude < longitudeSegments; ++longitude) {
+            const uint32_t a = latitude * ringVertexCount + longitude;
+            const uint32_t b = a + ringVertexCount;
+            const uint32_t c = b + 1u;
+            const uint32_t d = a + 1u;
+            indices.push_back(a);
+            indices.push_back(b);
+            indices.push_back(c);
+            indices.push_back(a);
+            indices.push_back(c);
+            indices.push_back(d);
+        }
+    }
+}
+
 } // namespace
 
 void ProbeVisualizer::create(vkm::VKMDevice* inDevice, vk::RenderPass renderPass, vk::PipelineCache pipelineCache)
@@ -73,6 +134,28 @@ void ProbeVisualizer::create(vkm::VKMDevice* inDevice, vk::RenderPass renderPass
     }
 
     device = inDevice;
+
+    std::vector<ProbeVisualizerSphereVertex> sphereVertices{};
+    std::vector<uint32_t> sphereIndices{};
+    // The overlay should still read as a sphere, but it does not need many
+    // triangles. Keeping the mesh coarse reduces vertex and fragment cost when
+    // hundreds of probes are visible.
+    appendSphereMesh(sphereVertices, sphereIndices, 6u, 8u);
+    sphereIndexCount = static_cast<uint32_t>(sphereIndices.size());
+    createBuffer(
+        *device,
+        sphereVertexBuffer,
+        static_cast<vk::DeviceSize>(sphereVertices.size() * sizeof(ProbeVisualizerSphereVertex)),
+        vk::BufferUsageFlagBits::eVertexBuffer,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent,
+        sphereVertices.data());
+    createBuffer(
+        *device,
+        sphereIndexBuffer,
+        static_cast<vk::DeviceSize>(sphereIndices.size() * sizeof(uint32_t)),
+        vk::BufferUsageFlagBits::eIndexBuffer,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent,
+        sphereIndices.data());
 
     vk::PushConstantRange pushConstantRange{};
     pushConstantRange.setStageFlags(vk::ShaderStageFlagBits::eVertex)
@@ -101,7 +184,20 @@ void ProbeVisualizer::create(vkm::VKMDevice* inDevice, vk::RenderPass renderPass
         makeStage(shaderModules[1], vk::ShaderStageFlagBits::eFragment),
     };
 
+    std::array<vk::VertexInputBindingDescription, 2> bindings{
+        vk::VertexInputBindingDescription{0, sizeof(ProbeVisualizerSphereVertex), vk::VertexInputRate::eVertex},
+        vk::VertexInputBindingDescription{1, sizeof(ProbeVisualizerInstanceData), vk::VertexInputRate::eInstance},
+    };
+    std::array<vk::VertexInputAttributeDescription, 4> attributes{
+        vk::VertexInputAttributeDescription{0, 0, vk::Format::eR32G32B32Sfloat, offsetof(ProbeVisualizerSphereVertex, position)},
+        vk::VertexInputAttributeDescription{1, 0, vk::Format::eR32G32B32Sfloat, offsetof(ProbeVisualizerSphereVertex, normal)},
+        vk::VertexInputAttributeDescription{2, 1, vk::Format::eR32G32B32A32Sfloat, offsetof(ProbeVisualizerInstanceData, positionAndRadius)},
+        vk::VertexInputAttributeDescription{3, 1, vk::Format::eR32G32B32A32Sfloat, offsetof(ProbeVisualizerInstanceData, color)},
+    };
     vk::PipelineVertexInputStateCreateInfo vertexInputState{};
+    vertexInputState.setVertexBindingDescriptions(bindings)
+        .setVertexAttributeDescriptions(attributes);
+
     vk::PipelineInputAssemblyStateCreateInfo inputAssemblyState{};
     inputAssemblyState.setTopology(vk::PrimitiveTopology::eTriangleList);
 
@@ -110,7 +206,7 @@ void ProbeVisualizer::create(vkm::VKMDevice* inDevice, vk::RenderPass renderPass
 
     vk::PipelineRasterizationStateCreateInfo rasterizationState{};
     rasterizationState.setPolygonMode(vk::PolygonMode::eFill)
-        .setCullMode(vk::CullModeFlagBits::eNone)
+        .setCullMode(vk::CullModeFlagBits::eBack)
         .setFrontFace(vk::FrontFace::eCounterClockwise)
         .setLineWidth(1.0f);
 
@@ -118,8 +214,9 @@ void ProbeVisualizer::create(vkm::VKMDevice* inDevice, vk::RenderPass renderPass
     multisampleState.setRasterizationSamples(vk::SampleCountFlagBits::e1);
 
     vk::PipelineDepthStencilStateCreateInfo depthStencilState{};
-    depthStencilState.setDepthTestEnable(VK_FALSE)
-        .setDepthWriteEnable(VK_FALSE)
+    depthStencilState.setDepthTestEnable(VK_TRUE)
+        .setDepthWriteEnable(VK_TRUE)
+        .setDepthCompareOp(vk::CompareOp::eLessOrEqual)
         .setStencilTestEnable(VK_FALSE);
 
     vk::PipelineColorBlendAttachmentState colorBlendAttachment{};
@@ -169,6 +266,12 @@ void ProbeVisualizer::destroy()
         return;
     }
 
+    if (instanceBuffer.mapped != nullptr) {
+        instanceBuffer.unmap();
+    }
+    instanceBuffer.destroy();
+    sphereIndexBuffer.destroy();
+    sphereVertexBuffer.destroy();
     if (pipelineHandle != VK_NULL_HANDLE) {
         device->logicalDevice.destroyPipeline(pipelineHandle);
     }
@@ -178,6 +281,12 @@ void ProbeVisualizer::destroy()
 
     pipelineHandle = VK_NULL_HANDLE;
     pipelineLayoutHandle = VK_NULL_HANDLE;
+    sphereIndexCount = 0u;
+    instanceCapacity = 0u;
+    cachedProbeCount = 0u;
+    instanceCpuData.clear();
+    cachedVolumeDesc = ddgi::DDGIVolumeDesc{};
+    instanceDataDirty = true;
     device = nullptr;
 }
 
@@ -186,8 +295,62 @@ void ProbeVisualizer::draw(vk::CommandBuffer commandBuffer,
                            const Camera& camera,
                            vk::Extent2D framebufferExtent)
 {
-    if (device == nullptr || pipelineHandle == VK_NULL_HANDLE) {
+    if (device == nullptr || pipelineHandle == VK_NULL_HANDLE || sphereIndexCount == 0u) {
         return;
+    }
+
+    const ddgi::DDGIVolumeDesc& volumeDesc = volume.description();
+    const uint32_t probeCount = volume.totalProbeCount();
+    if (probeCount == 0u) {
+        return;
+    }
+
+    if (instanceCapacity < probeCount || instanceBuffer.buffer == VK_NULL_HANDLE) {
+        if (instanceBuffer.mapped != nullptr) {
+            instanceBuffer.unmap();
+        }
+        instanceBuffer.destroy();
+        instanceCapacity = probeCount;
+        createBuffer(
+            *device,
+            instanceBuffer,
+            static_cast<vk::DeviceSize>(instanceCapacity) * sizeof(ProbeVisualizerInstanceData),
+            vk::BufferUsageFlagBits::eVertexBuffer,
+            vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent,
+            nullptr);
+        VK_CHECK_RESULT(instanceBuffer.map(VK_WHOLE_SIZE));
+        instanceDataDirty = true;
+    }
+
+    const bool layoutChanged =
+        cachedProbeCount != probeCount ||
+        cachedVolumeDesc.origin != volumeDesc.origin ||
+        cachedVolumeDesc.probeSpacing != volumeDesc.probeSpacing ||
+        cachedVolumeDesc.probeCounts != volumeDesc.probeCounts;
+
+    if (layoutChanged) {
+        cachedProbeCount = probeCount;
+        cachedVolumeDesc = volumeDesc;
+        instanceDataDirty = true;
+    }
+
+    if (instanceDataDirty) {
+        instanceCpuData.resize(probeCount);
+        const float sphereRadius = std::min(volumeDesc.probeSpacing.x,
+                                            std::min(volumeDesc.probeSpacing.y, volumeDesc.probeSpacing.z)) * 0.10f;
+        const glm::vec4 debugColor(0.10f, 0.85f, 1.00f, 1.0f);
+        for (uint32_t probeIndex = 0; probeIndex < probeCount; ++probeIndex) {
+            // Probe instance data is rebuilt only when the lattice changes.
+            // That keeps the overlay aligned with the current volume while
+            // avoiding per-frame CPU readback of DDGI ray buffers.
+            instanceCpuData[probeIndex].positionAndRadius = glm::vec4(
+                volume.probeWorldPosition(probeIndex, nullptr),
+                sphereRadius);
+            instanceCpuData[probeIndex].color = debugColor;
+        }
+
+        std::memcpy(instanceBuffer.mapped, instanceCpuData.data(), probeCount * sizeof(ProbeVisualizerInstanceData));
+        instanceDataDirty = false;
     }
 
     vk::Viewport viewport{};
@@ -204,11 +367,6 @@ void ProbeVisualizer::draw(vk::CommandBuffer commandBuffer,
 
     ProbeDebugPushConstants pushConstants{};
     pushConstants.viewProjection = camera.matrices.perspective * camera.matrices.view;
-    // Use a screen-space billboard size large enough to validate the probe
-    // grid visually before we replace these quads with richer sphere meshes.
-    pushConstants.volumeOriginAndSize = glm::vec4(volume.description().origin, 0.055f);
-    pushConstants.probeSpacing = glm::vec4(volume.description().probeSpacing, 0.0f);
-    pushConstants.probeCounts = glm::uvec4(volume.description().probeCounts, 0u);
     commandBuffer.pushConstants(
         pipelineLayoutHandle,
         vk::ShaderStageFlagBits::eVertex,
@@ -216,9 +374,14 @@ void ProbeVisualizer::draw(vk::CommandBuffer commandBuffer,
         sizeof(ProbeDebugPushConstants),
         &pushConstants);
 
-    const glm::uvec3 probeCounts = volume.description().probeCounts;
-    const uint32_t totalProbeCount = probeCounts.x * probeCounts.y * probeCounts.z;
-    commandBuffer.draw(6, totalProbeCount, 0, 0);
+    const std::array<vk::Buffer, 2> vertexBuffers{
+        sphereVertexBuffer.buffer,
+        instanceBuffer.buffer,
+    };
+    const std::array<vk::DeviceSize, 2> offsets{0, 0};
+    commandBuffer.bindVertexBuffers(0, vertexBuffers, offsets);
+    commandBuffer.bindIndexBuffer(sphereIndexBuffer.buffer, 0, vk::IndexType::eUint32);
+    commandBuffer.drawIndexed(sphereIndexCount, probeCount, 0, 0, 0);
 }
 
 } // namespace debug

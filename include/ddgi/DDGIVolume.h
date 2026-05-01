@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "Buffer.h"
 #include "camera.hpp"
 #include "ddgi/DDGIPipeline.h"
@@ -48,7 +50,9 @@ public:
 
     /**
      * Record classification, relocation, irradiance/depth accumulation, and
-     * atlas border copy compute dispatches.
+     * atlas border copy compute dispatches. Atlas update shaders only rewrite
+     * the probes assigned to the current interleaved update phase so the
+     * volume can amortize work across multiple frames.
      */
     void updateProbes(vk::CommandBuffer commandBuffer);
 
@@ -64,6 +68,32 @@ public:
      */
     void bindForLighting(vk::CommandBuffer commandBuffer, vk::PipelineLayout pipelineLayout, uint32_t setIndex) const;
 
+    /**
+     * Copy probe debug state from host-visible DDGI buffers.
+     * averageRadiance becomes one RGB value per probe by averaging the traced
+     * per-ray radiance buffer. This is a debug approximation chosen because the
+     * traced ray buffer is already host visible, while the atlas images are
+     * device-local storage images.
+     */
+    bool readProbeDebugData(std::vector<glm::vec3>& averageRadiance,
+                            std::vector<glm::vec3>& localOffsets,
+                            std::vector<uint32_t>& states) const;
+
+    /**
+     * Update one probe's local relocation offset in the host-visible debug
+     * buffer. The next trace/update pass consumes the modified offset buffer on
+     * GPU, so manual edits immediately affect both visualization and DDGI.
+     */
+    bool writeProbeOffset(uint32_t probeIndex, const glm::vec3& localOffset);
+
+    /**
+     * Convert a flat probe index into its current world-space position. The
+     * optional local offset is added on top of the regular grid location so
+     * relocation and manual edits are visible in the probe debug renderer.
+     */
+    [[nodiscard]] glm::vec3 probeWorldPosition(uint32_t probeIndex, const glm::vec3* localOffset = nullptr) const;
+
+    [[nodiscard]] uint32_t totalProbeCount() const { return resourceSet.totalProbeCount(); }
     [[nodiscard]] const DDGIVolumeDesc& description() const { return desc; }
     [[nodiscard]] const DDGIResources& resources() const { return resourceSet; }
     [[nodiscard]] const DDGIPipeline& pipelines() const { return pipelineSet; }

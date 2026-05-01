@@ -111,6 +111,29 @@ vec3 ddgiProbeWorldPosition(uvec3 probeCoord, vec3 volumeOriginWorld, vec3 probe
     return volumeOriginWorld + vec3(probeCoord) * probeSpacingWorld;
 }
 
+uint ddgiProbeUpdatePhaseCount(float encodedPhaseCount)
+{
+    return max(uint(round(encodedPhaseCount)), 1u);
+}
+
+uint ddgiCurrentProbeUpdatePhase(uint frameIndex, uint phaseCount)
+{
+    return phaseCount > 0u ? frameIndex % phaseCount : 0u;
+}
+
+uint ddgiPhaseProbeCount(uint probeCount, uint phaseCount, uint currentPhase)
+{
+    if (phaseCount == 0u || currentPhase >= probeCount) {
+        return 0u;
+    }
+    return ((probeCount - 1u - currentPhase) / phaseCount) + 1u;
+}
+
+bool ddgiProbeInUpdatePhase(uint probeIndex, uint frameIndex, uint phaseCount)
+{
+    return phaseCount <= 1u || (probeIndex % phaseCount) == ddgiCurrentProbeUpdatePhase(frameIndex, phaseCount);
+}
+
 vec3 ddgiApplySurfaceBias(vec3 surfacePositionWorld,
                           vec3 surfaceNormalWorld,
                           vec3 viewDirectionWorld,

@@ -7,6 +7,15 @@
 
 namespace scene {
 
+struct SceneBounds {
+    glm::vec3 min{0.0f};
+    glm::vec3 max{0.0f};
+    glm::vec3 center{0.0f};
+    glm::vec3 extent{0.0f};
+    float radius{0.0f};
+    bool valid{false};
+};
+
 struct SceneMesh {
     uint32_t firstIndex{0u};
     uint32_t indexCount{0u};
@@ -23,6 +32,7 @@ private:
     vkmglTF::Model gltfModel{};
     std::vector<SceneMesh> meshList;
     std::string loadedFilePath{};
+    SceneBounds bounds{};
 
 public:
     /**
@@ -46,6 +56,12 @@ public:
      * SceneGpuData reuses it to rebuild CPU-side compact geometry for RT.
      */
     [[nodiscard]] const std::string& sourcePath() const { return loadedFilePath; }
+    /**
+     * Return the scene-space axis-aligned bounding box exposed by the glTF
+     * loader. Keeping this as cached scene metadata avoids rescanning all
+     * primitives every time DDGI wants to fit a probe volume to the scene.
+     */
+    [[nodiscard]] const SceneBounds& sceneBounds() const { return bounds; }
 
 };
 

@@ -7,10 +7,20 @@
 namespace scene {
 namespace {
 
+constexpr bool kSceneUsesFlipY = true;
+
 glm::vec3 transformPoint(const glm::mat4& transform, const glm::vec3& point)
 {
     const glm::vec4 transformed = transform * glm::vec4(point, 1.0f);
     return glm::vec3(transformed) / std::max(transformed.w, 1.0e-6f);
+}
+
+void applyFlipYToBounds(glm::vec3& minBounds, glm::vec3& maxBounds)
+{
+    const float flippedMinY = -maxBounds.y;
+    const float flippedMaxY = -minBounds.y;
+    minBounds.y = flippedMinY;
+    maxBounds.y = flippedMaxY;
 }
 
 void calculateWorldBounds(const glm::mat4& worldFromLocal,
@@ -60,7 +70,18 @@ void appendNodeMeshes(const vkmglTF::Model& model, vkmglTF::Node& node, std::vec
 
             glm::vec3 worldMin{};
             glm::vec3 worldMax{};
-            calculateWorldBounds(worldFromLocal, primitive->dimensions.min, primitive->dimensions.max, worldMin, worldMax);
+            glm::vec3 localMin = primitive->dimensions.min;
+            glm::vec3 localMax = primitive->dimensions.max;
+            if (kSceneUsesFlipY) {
+                // The project loads glTF with FlipY enabled. Primitive
+                // dimensions stored in vulkan_base come from the original
+                // accessor range, so we mirror the local Y bounds here before
+                // mapping them into world space. Without this, the derived
+                // scene AABB ends up mirrored vertically and DDGI probes can be
+                // initialized below the visible floor.
+                applyFlipYToBounds(localMin, localMax);
+            }
+            calculateWorldBounds(worldFromLocal, localMin, localMax, worldMin, worldMax);
 
             SceneMesh mesh{};
             mesh.firstIndex = primitive->firstIndex;
@@ -82,7 +103,9 @@ void Scene::loadFromFile(vkm::VKMDevice* device, const std::string& filename, vk
 {
     loadedFilePath = filename;
     gltfModel = vkmglTF::Model(device);
-    // Keep glTF geometry in its native Y-up world convention. 
+    // The existing sample shaders and camera expect the same glTF load flags
+    // that the rest of the project already uses, so the stable scene AABB is
+    // taken from the loader after those transforms have been applied.
     const uint32_t gltfLoadingFlags = vkmglTF::FileLoadingFlags::FlipY | vkmglTF::FileLoadingFlags::PreTransformVertices;
     gltfModel.loadFromFile(filename, transferQueue, gltfLoadingFlags);
 
@@ -94,24 +117,39 @@ void Scene::loadFromFile(vkm::VKMDevice* device, const std::string& filename, vk
         }
     }
 
+    bounds = {};
+    if (!meshList.empty()) {
+        bounds.min = glm::vec3(FLT_MAX);
+        bounds.max = glm::vec3(-FLT_MAX);
+        for (const SceneMesh& mesh : meshList) {
+            bounds.min = glm::min(bounds.min, mesh.minBounds);
+            bounds.max = glm::max(bounds.max, mesh.maxBounds);
+        }
+        bounds.center = (bounds.min + bounds.max) * 0.5f;
+        bounds.extent = bounds.max - bounds.min;
+        bounds.radius = glm::distance(bounds.min, bounds.max) * 0.5f;
+        bounds.valid = true;
+    }
+
     OutputMessage(
         "[Scene] Bounds min=({:.2f}, {:.2f}, {:.2f}) max=({:.2f}, {:.2f}, {:.2f}) center=({:.2f}, {:.2f}, {:.2f}) radius={:.2f}\n",
-        gltfModel.dimensions.min.x,
-        gltfModel.dimensions.min.y,
-        gltfModel.dimensions.min.z,
-        gltfModel.dimensions.max.x,
-        gltfModel.dimensions.max.y,
-        gltfModel.dimensions.max.z,
-        gltfModel.dimensions.center.x,
-        gltfModel.dimensions.center.y,
-        gltfModel.dimensions.center.z,
-        gltfModel.dimensions.radius);
+        bounds.min.x,
+        bounds.min.y,
+        bounds.min.z,
+        bounds.max.x,
+        bounds.max.y,
+        bounds.max.z,
+        bounds.center.x,
+        bounds.center.y,
+        bounds.center.z,
+        bounds.radius);
 }
 
 void Scene::clear()
 {
     meshList.clear();
     loadedFilePath.clear();
+    bounds = {};
 }
 
 } // namespace scene

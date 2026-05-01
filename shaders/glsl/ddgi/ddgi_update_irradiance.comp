@@ -65,6 +65,11 @@ void main()
         return;
     }
 
+    uint phaseCount = ddgiProbeUpdatePhaseCount(constants.biasAndDebug.w);
+    if (!ddgiProbeInUpdatePhase(probeIndex, constants.probeCounts.w, phaseCount)) {
+        return;
+    }
+
     uint raysPerProbe = max(uint(constants.volumeOriginAndRays.w), 1u);
     vec3 texelDirection = ddgiOctTexelDirection(octTexel, constants.atlasLayout.z);
 

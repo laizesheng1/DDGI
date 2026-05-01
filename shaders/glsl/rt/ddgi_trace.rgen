@@ -49,13 +49,18 @@ layout(location = 0) rayPayloadEXT DDGITracePayload payload;
 void main()
 {
     uint raysPerProbe = max(uint(constants.volumeOriginAndRays.w), 1u);
-    uint globalRayIndex = gl_LaunchIDEXT.x;
-    uint probeIndex = globalRayIndex / raysPerProbe;
-    uint rayIndex = globalRayIndex - probeIndex * raysPerProbe;
     uint probeCount = constants.probeCounts.x * constants.probeCounts.y * constants.probeCounts.z;
-    if (probeIndex >= probeCount) {
+    uint phaseCount = ddgiProbeUpdatePhaseCount(constants.biasAndDebug.w);
+    uint currentPhase = ddgiCurrentProbeUpdatePhase(constants.probeCounts.w, phaseCount);
+    uint phaseProbeCount = ddgiPhaseProbeCount(probeCount, phaseCount, currentPhase);
+    uint phaseRayIndex = gl_LaunchIDEXT.x;
+    uint phaseProbeIndex = phaseRayIndex / raysPerProbe;
+    if (phaseProbeIndex >= phaseProbeCount) {
         return;
     }
+    uint rayIndex = phaseRayIndex - phaseProbeIndex * raysPerProbe;
+    uint probeIndex = currentPhase + phaseProbeIndex * phaseCount;
+    uint globalRayIndex = probeIndex * raysPerProbe + rayIndex;
 
     uvec3 probeCoord = ddgiProbeCoord(probeIndex, constants.probeCounts.xyz);
     vec3 probeOriginWorld = ddgiProbeWorldPosition(

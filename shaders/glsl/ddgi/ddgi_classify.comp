@@ -1,4 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "../common/ddgi_common.glsl"
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -38,6 +41,11 @@ void main()
     uint probeIndex = gl_GlobalInvocationID.x;
     uint probeCount = constants.probeCounts.x * constants.probeCounts.y * constants.probeCounts.z;
     if (probeIndex >= probeCount) {
+        return;
+    }
+
+    uint phaseCount = ddgiProbeUpdatePhaseCount(constants.biasAndDebug.w);
+    if (!ddgiProbeInUpdatePhase(probeIndex, constants.probeCounts.w, phaseCount)) {
         return;
     }
 

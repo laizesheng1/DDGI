@@ -13,6 +13,10 @@ struct DDGIVolumeDesc {
     glm::vec3 probeSpacing{2.0f, 2.0f, 2.0f};
     glm::uvec3 probeCounts{9u, 5u, 9u};
     uint32_t raysPerProbe{128u};
+    // Interleave probe updates across this many frames. A value of 4 means
+    // only one quarter of the probes trace and refresh their atlas texels each
+    // frame, which reduces RT cost while hysteresis keeps lighting stable.
+    uint32_t probeUpdatePhaseCount{4u};
     uint32_t irradianceOctSize{8u};
     uint32_t depthOctSize{16u};
     float hysteresis{0.97f};

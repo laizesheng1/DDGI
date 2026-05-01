@@ -241,7 +241,8 @@ void TextureVisualizer::destroy()
 void TextureVisualizer::draw(vk::CommandBuffer commandBuffer,
                              const ddgi::DDGIVolume& volume,
                              ddgi::DebugTexture texture,
-                             vk::Extent2D framebufferExtent)
+                             const vk::Viewport& viewport,
+                             const vk::Rect2D& scissor)
 {
     if (device == nullptr || pipelineHandle == VK_NULL_HANDLE) {
         return;
@@ -259,26 +260,6 @@ void TextureVisualizer::draw(vk::CommandBuffer commandBuffer,
         device->logicalDevice.updateDescriptorSets(descriptorWrite, {});
         cachedImageViews[textureIndex] = descriptor.imageView;
     }
-
-    const float panelWidth = static_cast<float>(std::max(256u, framebufferExtent.width / 4u));
-    const float panelHeight = panelWidth;
-    const float margin = 16.0f;
-    vk::Viewport viewport{};
-    viewport.setX(static_cast<float>(framebufferExtent.width) - panelWidth - margin)
-        .setY(margin)
-        .setWidth(panelWidth)
-        .setHeight(panelHeight)
-        .setMinDepth(0.0f)
-        .setMaxDepth(1.0f);
-    vk::Rect2D scissor{};
-    scissor.setOffset(vk::Offset2D{
-        static_cast<int32_t>(std::max(0.0f, viewport.x)),
-        static_cast<int32_t>(std::max(0.0f, viewport.y)),
-    });
-    scissor.setExtent(vk::Extent2D{
-        static_cast<uint32_t>(viewport.width),
-        static_cast<uint32_t>(viewport.height),
-    });
 
     commandBuffer.setViewport(0, viewport);
     commandBuffer.setScissor(0, scissor);

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 
 namespace ddgi {
 namespace {
@@ -9,6 +10,39 @@ namespace {
 uint32_t dispatchGroups(uint32_t texelCount, uint32_t localSize)
 {
     return (texelCount + localSize - 1u) / localSize;
+}
+
+uint32_t probeUpdatePhaseCount(const DDGIVolumeDesc& desc)
+{
+    return std::max(1u, desc.probeUpdatePhaseCount);
+}
+
+uint32_t currentProbeUpdatePhase(const DDGIVolumeDesc& desc, uint32_t frameIndex)
+{
+    const uint32_t phaseCount = probeUpdatePhaseCount(desc);
+    return phaseCount > 0u ? frameIndex % phaseCount : 0u;
+}
+
+uint32_t probesInUpdatePhase(const DDGIVolumeDesc& desc, uint32_t frameIndex)
+{
+    const uint32_t probeCount = desc.probeCounts.x * desc.probeCounts.y * desc.probeCounts.z;
+    const uint32_t phaseCount = probeUpdatePhaseCount(desc);
+    const uint32_t phaseIndex = currentProbeUpdatePhase(desc, frameIndex);
+    if (phaseIndex >= probeCount) {
+        return 0u;
+    }
+    return ((probeCount - 1u - phaseIndex) / phaseCount) + 1u;
+}
+
+glm::uvec3 probeCoordinateFromIndex(uint32_t probeIndex, const glm::uvec3& probeCounts)
+{
+    const uint32_t countX = std::max(1u, probeCounts.x);
+    const uint32_t countY = std::max(1u, probeCounts.y);
+    const uint32_t xyCount = countX * countY;
+    return glm::uvec3(
+        probeIndex % countX,
+        (probeIndex / countX) % countY,
+        probeIndex / xyCount);
 }
 
 void recordStorageBufferShaderBarrier(vk::CommandBuffer commandBuffer, const vkm::Buffer& buffer)
@@ -167,7 +201,11 @@ void DDGIVolume::updateConstants(const Camera& camera, uint32_t frameIndex)
     constants.volumeOriginAndRays = glm::vec4(desc.origin, static_cast<float>(desc.raysPerProbe));
     constants.probeSpacingAndHysteresis = glm::vec4(desc.probeSpacing, desc.hysteresis);
     constants.probeCounts = glm::uvec4(desc.probeCounts, frameIndex);
-    constants.biasAndDebug = glm::vec4(desc.normalBias, desc.viewBias, desc.sdfProbePushDistance, 0.0f);
+    constants.biasAndDebug = glm::vec4(
+        desc.normalBias,
+        desc.viewBias,
+        desc.sdfProbePushDistance,
+        static_cast<float>(probeUpdatePhaseCount(desc)));
     constants.atlasLayout = glm::uvec4(
         resourceSet.textures().probeTileColumns,
         resourceSet.textures().probeTileRows,
@@ -208,11 +246,16 @@ void DDGIVolume::traceProbeRays(vk::CommandBuffer commandBuffer, const rt::RayTr
         rtSceneDescriptorSet,
         {});
 
-    const uint32_t totalRayCount = resourceSet.totalProbeCount() * desc.raysPerProbe;
+    const uint32_t phaseProbeCount = probesInUpdatePhase(desc, constants.probeCounts.w);
+    const uint32_t totalRayCount = phaseProbeCount * desc.raysPerProbe;
+    if (totalRayCount == 0u) {
+        return;
+    }
     const rt::ShaderBindingTableRegions& sbtRegions = traceShaderBindingTable.stridedRegions();
-    // The trace launch is 1D because ddgi_trace.rgen maps LaunchID.x directly
-    // to (probeIndex, rayIndex). Later gather stages consume probeRayData as a
-    // flat array with the same layout.
+    // The trace launch is 1D and only covers the probes assigned to the
+    // current update phase. The raygen shader expands the phase-local launch
+    // index back to the full probe index before writing probeRayData, so
+    // lighting and atlas gather still see one stable flat array layout.
     VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdTraceRaysKHR(
         static_cast<VkCommandBuffer>(commandBuffer),
         reinterpret_cast<const VkStridedDeviceAddressRegionKHR*>(&sbtRegions.raygen),
@@ -311,6 +354,114 @@ void DDGIVolume::bindForLighting(vk::CommandBuffer commandBuffer, vk::PipelineLa
         setIndex,
         resourceSet.descriptorSet(),
         {});
+}
+
+bool DDGIVolume::readProbeDebugData(std::vector<glm::vec3>& averageRadiance,
+                                    std::vector<glm::vec3>& localOffsets,
+                                    std::vector<uint32_t>& states) const
+{
+    if (!resourceSet.isCreated() || device == nullptr) {
+        return false;
+    }
+
+    const uint32_t probeCount = resourceSet.totalProbeCount();
+    const uint32_t raysPerProbe = desc.raysPerProbe;
+    averageRadiance.assign(probeCount, glm::vec3(0.0f));
+    localOffsets.assign(probeCount, glm::vec3(0.0f));
+    states.assign(probeCount, 0u);
+
+    const vkm::Buffer& probeRayDataBuffer = resourceSet.probeRayData();
+    const vkm::Buffer& probeOffsetsBuffer = resourceSet.probeOffsets();
+    const vkm::Buffer& probeStatesBuffer = resourceSet.probeStates();
+    if (probeRayDataBuffer.memory == VK_NULL_HANDLE ||
+        probeOffsetsBuffer.memory == VK_NULL_HANDLE ||
+        probeStatesBuffer.memory == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    void* probeRayMapped = nullptr;
+    void* probeOffsetsMapped = nullptr;
+    void* probeStatesMapped = nullptr;
+    VK_CHECK_RESULT(device->logicalDevice.mapMemory(
+        probeRayDataBuffer.memory,
+        0,
+        probeRayDataBuffer.size,
+        {},
+        &probeRayMapped));
+    VK_CHECK_RESULT(device->logicalDevice.mapMemory(
+        probeOffsetsBuffer.memory,
+        0,
+        probeOffsetsBuffer.size,
+        {},
+        &probeOffsetsMapped));
+    VK_CHECK_RESULT(device->logicalDevice.mapMemory(
+        probeStatesBuffer.memory,
+        0,
+        probeStatesBuffer.size,
+        {},
+        &probeStatesMapped));
+
+    const auto* rayData = reinterpret_cast<const DDGIProbeRayGpuData*>(probeRayMapped);
+    const auto* offsets = reinterpret_cast<const glm::vec4*>(probeOffsetsMapped);
+    const auto* stateData = reinterpret_cast<const uint32_t*>(probeStatesMapped);
+
+    for (uint32_t probeIndex = 0; probeIndex < probeCount; ++probeIndex) {
+        glm::vec3 radianceSum{0.0f};
+        uint32_t validRayCount = 0u;
+        const uint32_t rayBaseIndex = probeIndex * raysPerProbe;
+        for (uint32_t rayIndex = 0; rayIndex < raysPerProbe; ++rayIndex) {
+            const DDGIProbeRayGpuData& ray = rayData[rayBaseIndex + rayIndex];
+            if (ray.radianceAndDistance.w <= 0.0f) {
+                continue;
+            }
+            radianceSum += glm::max(glm::vec3(ray.radianceAndDistance), glm::vec3(0.0f));
+            ++validRayCount;
+        }
+        averageRadiance[probeIndex] = validRayCount > 0u
+            ? radianceSum / static_cast<float>(validRayCount)
+            : glm::vec3(0.0f);
+        localOffsets[probeIndex] = glm::vec3(offsets[probeIndex]);
+        states[probeIndex] = stateData[probeIndex];
+    }
+
+    device->logicalDevice.unmapMemory(probeStatesBuffer.memory);
+    device->logicalDevice.unmapMemory(probeOffsetsBuffer.memory);
+    device->logicalDevice.unmapMemory(probeRayDataBuffer.memory);
+    return true;
+}
+
+bool DDGIVolume::writeProbeOffset(uint32_t probeIndex, const glm::vec3& localOffset)
+{
+    const vkm::Buffer& probeOffsetsBuffer = resourceSet.probeOffsets();
+    if (!resourceSet.isCreated() ||
+        probeIndex >= resourceSet.totalProbeCount() ||
+        device == nullptr ||
+        probeOffsetsBuffer.memory == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    void* mapped = nullptr;
+    const vk::DeviceSize byteOffset = static_cast<vk::DeviceSize>(probeIndex) * sizeof(glm::vec4);
+    VK_CHECK_RESULT(device->logicalDevice.mapMemory(
+        probeOffsetsBuffer.memory,
+        byteOffset,
+        sizeof(glm::vec4),
+        {},
+        &mapped));
+    glm::vec4 packedOffset(localOffset, 0.0f);
+    std::memcpy(mapped, &packedOffset, sizeof(glm::vec4));
+    device->logicalDevice.unmapMemory(probeOffsetsBuffer.memory);
+    return true;
+}
+
+glm::vec3 DDGIVolume::probeWorldPosition(uint32_t probeIndex, const glm::vec3* localOffset) const
+{
+    const glm::uvec3 probeCoord = probeCoordinateFromIndex(probeIndex, desc.probeCounts);
+    glm::vec3 worldPosition = desc.origin + glm::vec3(probeCoord) * desc.probeSpacing;
+    if (localOffset != nullptr) {
+        worldPosition += *localOffset;
+    }
+    return worldPosition;
 }
 
 } // namespace ddgi
