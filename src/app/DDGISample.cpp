@@ -19,6 +19,17 @@ glm::vec3 maxVec3(const glm::vec3& value, float scalar)
     return (glm::max)(value, glm::vec3(scalar));
 }
 
+void copyVolumeDescToDebugState(debug::DebugUIState& state, const ddgi::DDGIVolumeDesc& desc)
+{
+    state.raysPerProbe = desc.raysPerProbe;
+    state.fixedRayCount = (std::min)(desc.fixedRayCount, desc.raysPerProbe);
+    state.probeUpdatePhaseCount = desc.probeUpdatePhaseCount;
+    state.hysteresis = desc.hysteresis;
+    state.maxRayDistance = desc.maxRayDistance;
+    state.relocationEnabled = desc.relocationEnabled;
+    state.classificationEnabled = desc.classificationEnabled;
+}
+
 } // namespace
 
 DDGISample::DDGISample()
@@ -44,7 +55,12 @@ ddgi::DDGIVolumeDesc DDGISample::buildVolumeDescFromDebugState() const
     ddgi::DDGIVolumeDesc volumeDesc = manualVolumeDesc;
     const float density = (std::max)(debugState.probeDensity, 0.25f);
     volumeDesc.raysPerProbe = debugState.raysPerProbe;
-    volumeDesc.probeUpdatePhaseCount = 4u;
+    volumeDesc.fixedRayCount = (std::min)(debugState.fixedRayCount, volumeDesc.raysPerProbe);
+    volumeDesc.probeUpdatePhaseCount = (std::max)(1u, debugState.probeUpdatePhaseCount);
+    volumeDesc.hysteresis = (std::clamp)(debugState.hysteresis, 0.0f, 0.99f);
+    volumeDesc.maxRayDistance = (std::max)(debugState.maxRayDistance, 1.0f);
+    volumeDesc.relocationEnabled = debugState.relocationEnabled;
+    volumeDesc.classificationEnabled = debugState.classificationEnabled;
 
     if (debugState.distributionMode == debug::ProbeDistributionMode::ManualVolume ||
         !debugState.autoFitProbesToSceneBounds ||
@@ -107,7 +123,7 @@ void DDGISample::recreateDdgiVolumeAndRenderer(const ddgi::DDGIVolumeDesc& volum
         ddgiVolume.resources().descriptorSetLayout());
     manualVolumeDesc = volumeDesc;
     debugState.probeCount = ddgiVolume.totalProbeCount();
-    debugState.raysPerProbe = volumeDesc.raysPerProbe;
+    copyVolumeDescToDebugState(debugState, volumeDesc);
 }
 
 void DDGISample::applyPendingDebugChanges()
@@ -117,13 +133,16 @@ void DDGISample::applyPendingDebugChanges()
         recreateDdgiVolumeAndRenderer(updatedDesc);
         debugState.requestApplyProbeLayout = false;
     }
+    if (debugState.requestClearProbes) {
+        ddgiVolume.requestClearProbes();
+        debugState.requestClearProbes = false;
+    }
 }
 
 void DDGISample::syncDebugStateFromVolume()
 {
     debugState.probeCount = ddgiVolume.totalProbeCount();
     debugState.volumeOrigin = ddgiVolume.description().origin;
-    debugState.probeUpdatePhaseCount = ddgiVolume.description().probeUpdatePhaseCount;
     debugState.currentProbeUpdatePhase = frameCounter % (std::max)(1u, debugState.probeUpdatePhaseCount);
 }
 
@@ -184,7 +203,7 @@ void DDGISample::prepare()
     const ddgi::DDGIVolumeDesc initialVolumeDesc = buildVolumeDescFromDebugState();
     ddgiVolume.create(VKMDevice, pipelineCache, initialVolumeDesc);
     manualVolumeDesc = initialVolumeDesc;
-    debugState.raysPerProbe = initialVolumeDesc.raysPerProbe;
+    copyVolumeDescToDebugState(debugState, initialVolumeDesc);
     renderer.create(
         VKMDevice,
         pipelineCache,

@@ -14,15 +14,24 @@ struct DDGIFrameConstants {
     uvec4 probeCounts;
     vec4 biasAndDebug;
     uvec4 atlasLayout;
+    vec4 traceParams;
+    vec4 stabilityParams;
+    uvec4 updateParams;
+    vec4 scrollAnchorAndMovement;
 };
 
 struct DDGIProbeRayData {
     vec4 radianceAndDistance;
     vec4 directionAndDistanceSquared;
+    vec4 normalAndFlags;
 };
 
 layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
     DDGIFrameConstants constants;
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer ProbeRayDataBuffer {
+    DDGIProbeRayData probeRayData[];
 };
 
 layout(set = 0, binding = 2, std430) buffer ProbeOffsetsBuffer {
@@ -37,9 +46,42 @@ void main()
         return;
     }
 
-    // For the current debug workflow we keep probes locked to the regular
-    // volume grid. The user only wants to inspect spatial density and move the
-    // whole volume, so adaptive per-probe relocation would make the spheres
-    // drift independently and obscure whether the base layout itself is good.
-    probeOffsets[probeIndex] = vec4(0.0);
+    uint phaseCount = max(constants.updateParams.y, 1u);
+    if (!ddgiProbeInUpdatePhase(probeIndex, constants.probeCounts.w, phaseCount)) {
+        return;
+    }
+
+    uint raysPerProbe = max(uint(constants.volumeOriginAndRays.w), 1u);
+    uint fixedRayCount = min(constants.updateParams.x, raysPerProbe);
+    if (fixedRayCount == 0u) {
+        return;
+    }
+
+    vec3 accumulatedPush = vec3(0.0);
+    float accumulatedWeight = 0.0;
+    uint rayBaseIndex = probeIndex * raysPerProbe;
+    for (uint rayIndex = 0u; rayIndex < fixedRayCount; ++rayIndex) {
+        DDGIProbeRayData rayData = probeRayData[rayBaseIndex + rayIndex];
+        uint flags = uint(rayData.normalAndFlags.w + 0.5);
+        bool backfaceHit = (flags & 2u) != 0u;
+        if (!backfaceHit) {
+            continue;
+        }
+
+        vec3 rayDirection = ddgiSafeNormalize(rayData.directionAndDistanceSquared.xyz);
+        float hitDistance = min(rayData.radianceAndDistance.w, constants.stabilityParams.w);
+        // If the probe sees mostly backfaces, it is likely behind a surface.
+        // Moving opposite the offending fixed rays is a cheap first relocation
+        // policy; the offset is still clamped to 45% of cell size below so it
+        // cannot jump across neighboring probe cells.
+        accumulatedPush += -rayDirection * max(hitDistance, 0.01);
+        accumulatedWeight += 1.0;
+    }
+
+    vec3 previousOffset = probeOffsets[probeIndex].xyz;
+    vec3 targetOffset = accumulatedWeight > 0.0
+        ? previousOffset + accumulatedPush / accumulatedWeight
+        : previousOffset * 0.90;
+    vec3 maxOffset = constants.probeSpacingAndHysteresis.xyz * 0.45;
+    probeOffsets[probeIndex] = vec4(clamp(targetOffset, -maxOffset, maxOffset), 0.0);
 }

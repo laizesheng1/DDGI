@@ -6,6 +6,8 @@ struct DDGITracePayload {
     float distance;
     vec3 direction;
     float distanceSquared;
+    vec3 normal;
+    float flags;
 };
 
 layout(location = 0) rayPayloadInEXT DDGITracePayload payload;
@@ -21,4 +23,6 @@ void main()
     payload.distance = 1.0e27;
     payload.direction = rayDirectionWorld;
     payload.distanceSquared = payload.distance * payload.distance;
+    payload.normal = vec3(0.0);
+    payload.flags = 4.0;
 }

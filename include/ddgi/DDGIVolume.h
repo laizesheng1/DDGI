@@ -23,6 +23,7 @@ private:
     vk::DescriptorPool rtSceneDescriptorPool{VK_NULL_HANDLE};
     vk::DescriptorSet rtSceneDescriptorSet{VK_NULL_HANDLE};
     vk::AccelerationStructureKHR boundTopLevelAccelerationStructure{VK_NULL_HANDLE};
+    bool clearRequested{false};
 
 public:
     /**
@@ -41,6 +42,14 @@ public:
      * frameIndex is used by shaders as a deterministic temporal seed.
      */
     void updateConstants(const Camera& camera, uint32_t frameIndex);
+
+    /**
+     * Request that the next recorded DDGI frame clears probe ray data, offsets,
+     * states, and atlas history before tracing/updating. The clear is deferred
+     * until command recording so atlas image clears remain synchronized with
+     * the rest of the DDGI GPU work.
+     */
+    void requestClearProbes();
 
     /**
      * Record probe ray tracing commands when an RT pipeline, TLAS, scene

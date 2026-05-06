@@ -109,6 +109,20 @@ vk::DescriptorSetLayoutBinding makeBinding(DDGIResourceBinding binding,
     return layoutBinding;
 }
 
+std::vector<DDGIProbeRayGpuData> createClearedProbeRayData(uint32_t probeCount, uint32_t raysPerProbe)
+{
+    std::vector<DDGIProbeRayGpuData> rayData(static_cast<size_t>(probeCount) * raysPerProbe);
+    for (DDGIProbeRayGpuData& ray : rayData) {
+        // A very large distance means "miss / not initialized" for the atlas
+        // update passes. Keeping the direction finite avoids NaNs in debug code
+        // that averages directions or radiance after a clear.
+        ray.radianceAndDistance = glm::vec4(0.0f, 0.0f, 0.0f, 1.0e27f);
+        ray.directionAndDistanceSquared = glm::vec4(0.0f, 1.0f, 0.0f, 1.0e27f);
+        ray.normalAndFlags = glm::vec4(0.0f);
+    }
+    return rayData;
+}
+
 } // namespace
 
 void DDGIResources::create(vkm::VKMDevice* inDevice, const DDGIVolumeDesc& desc)
@@ -144,11 +158,7 @@ void DDGIResources::create(vkm::VKMDevice* inDevice, const DDGIVolumeDesc& desc)
         sizeof(DDGIProbeRayGpuData);
     probeOffsetsBytes = static_cast<vk::DeviceSize>(probeCount) * sizeof(glm::vec4);
     probeStatesBytes = static_cast<vk::DeviceSize>(probeCount) * sizeof(uint32_t);
-    std::vector<DDGIProbeRayGpuData> initialRayData(static_cast<size_t>(probeCount) * desc.raysPerProbe);
-    for (DDGIProbeRayGpuData& rayData : initialRayData) {
-        rayData.radianceAndDistance = glm::vec4(0.0f, 0.0f, 0.0f, 1.0e27f);
-        rayData.directionAndDistanceSquared = glm::vec4(0.0f, 1.0f, 0.0f, 1.0e27f);
-    }
+    std::vector<DDGIProbeRayGpuData> initialRayData = createClearedProbeRayData(probeCount, desc.raysPerProbe);
     std::vector<glm::vec4> initialProbeOffsets(probeCount, glm::vec4(0.0f));
     std::vector<uint32_t> initialProbeStates(probeCount, 0u);
 
@@ -278,6 +288,36 @@ void DDGIResources::updateConstants(const DDGIFrameConstants& constants)
     constantsBuffer.unmap();
 }
 
+void DDGIResources::resetProbeBuffers(const DDGIVolumeDesc& desc)
+{
+    if (!created || desc.raysPerProbe == 0u) {
+        return;
+    }
+
+    std::vector<DDGIProbeRayGpuData> clearedRayData = createClearedProbeRayData(probeCount, desc.raysPerProbe);
+    std::vector<glm::vec4> clearedOffsets(probeCount, glm::vec4(0.0f));
+    std::vector<uint32_t> clearedStates(probeCount, 0u);
+
+    // These buffers are intentionally host visible during bring-up so debug UI
+    // can inspect and edit probe state. A direct map/copy clear is simpler and
+    // avoids allocating transient staging buffers for a user-triggered action.
+    if (probeRayDataBuffer.buffer != VK_NULL_HANDLE) {
+        VK_CHECK_RESULT(probeRayDataBuffer.map(probeRayDataBytes));
+        std::memcpy(probeRayDataBuffer.mapped, clearedRayData.data(), static_cast<size_t>(probeRayDataBytes));
+        probeRayDataBuffer.unmap();
+    }
+    if (probeOffsetsBuffer.buffer != VK_NULL_HANDLE) {
+        VK_CHECK_RESULT(probeOffsetsBuffer.map(probeOffsetsBytes));
+        std::memcpy(probeOffsetsBuffer.mapped, clearedOffsets.data(), static_cast<size_t>(probeOffsetsBytes));
+        probeOffsetsBuffer.unmap();
+    }
+    if (probeStatesBuffer.buffer != VK_NULL_HANDLE) {
+        VK_CHECK_RESULT(probeStatesBuffer.map(probeStatesBytes));
+        std::memcpy(probeStatesBuffer.mapped, clearedStates.data(), static_cast<size_t>(probeStatesBytes));
+        probeStatesBuffer.unmap();
+    }
+}
+
 void DDGIResources::recordInitialLayoutTransitions(vk::CommandBuffer commandBuffer)
 {
     if (!created || !needsInitialLayoutTransition) {
@@ -320,6 +360,56 @@ void DDGIResources::recordInitialLayoutTransitions(vk::CommandBuffer commandBuff
         {},
         barriers);
     needsInitialLayoutTransition = false;
+}
+
+void DDGIResources::recordClearAtlases(vk::CommandBuffer commandBuffer) const
+{
+    if (!created) {
+        return;
+    }
+
+    vk::ImageSubresourceRange subresourceRange{};
+    subresourceRange.setAspectMask(vk::ImageAspectFlagBits::eColor)
+        .setBaseMipLevel(0)
+        .setLevelCount(1)
+        .setBaseArrayLayer(0)
+        .setLayerCount(1);
+
+    const vk::ClearColorValue clearRadiance(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f});
+    const vk::ClearColorValue clearDistance(std::array<float, 4>{1.0e27f, 0.0f, 0.0f, 0.0f});
+
+    commandBuffer.clearColorImage(textureSet.irradiance.image, vk::ImageLayout::eGeneral, clearRadiance, subresourceRange);
+    commandBuffer.clearColorImage(textureSet.depth.image, vk::ImageLayout::eGeneral, clearDistance, subresourceRange);
+    commandBuffer.clearColorImage(textureSet.depthSquared.image, vk::ImageLayout::eGeneral, clearDistance, subresourceRange);
+
+    std::array<vk::ImageMemoryBarrier, 3> barriers{};
+    const std::array<vk::Image, 3> images{
+        textureSet.irradiance.image,
+        textureSet.depth.image,
+        textureSet.depthSquared.image,
+    };
+    for (size_t imageIndex = 0; imageIndex < images.size(); ++imageIndex) {
+        barriers[imageIndex].setOldLayout(vk::ImageLayout::eGeneral)
+            .setNewLayout(vk::ImageLayout::eGeneral)
+            .setSrcAccessMask(vk::AccessFlagBits::eTransferWrite)
+            .setDstAccessMask(vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite)
+            .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+            .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+            .setImage(images[imageIndex])
+            .setSubresourceRange(subresourceRange);
+    }
+
+    // Clear uses the transfer pipeline, while subsequent DDGI passes read and
+    // write the same storage images in compute and fragment shaders. This
+    // barrier makes a user-triggered history reset visible without changing
+    // the long-lived General layout used by the atlas descriptors.
+    commandBuffer.pipelineBarrier(
+        vk::PipelineStageFlagBits::eTransfer,
+        vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eFragmentShader,
+        {},
+        {},
+        {},
+        barriers);
 }
 
 void DDGIResources::recordProbeRayReadBarrier(vk::CommandBuffer commandBuffer) const

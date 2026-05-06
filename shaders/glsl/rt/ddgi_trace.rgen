@@ -13,11 +13,16 @@ struct DDGIFrameConstants {
     uvec4 probeCounts;
     vec4 biasAndDebug;
     uvec4 atlasLayout;
+    vec4 traceParams;
+    vec4 stabilityParams;
+    uvec4 updateParams;
+    vec4 scrollAnchorAndMovement;
 };
 
 struct DDGIProbeRayData {
     vec4 radianceAndDistance;
     vec4 directionAndDistanceSquared;
+    vec4 normalAndFlags;
 };
 
 struct DDGITracePayload {
@@ -25,6 +30,8 @@ struct DDGITracePayload {
     float distance;
     vec3 direction;
     float distanceSquared;
+    vec3 normal;
+    float flags;
 };
 
 layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
@@ -50,7 +57,7 @@ void main()
 {
     uint raysPerProbe = max(uint(constants.volumeOriginAndRays.w), 1u);
     uint probeCount = constants.probeCounts.x * constants.probeCounts.y * constants.probeCounts.z;
-    uint phaseCount = ddgiProbeUpdatePhaseCount(constants.biasAndDebug.w);
+    uint phaseCount = max(constants.updateParams.y, 1u);
     uint currentPhase = ddgiCurrentProbeUpdatePhase(constants.probeCounts.w, phaseCount);
     uint phaseProbeCount = ddgiPhaseProbeCount(probeCount, phaseCount, currentPhase);
     uint phaseRayIndex = gl_LaunchIDEXT.x;
@@ -61,6 +68,18 @@ void main()
     uint rayIndex = phaseRayIndex - phaseProbeIndex * raysPerProbe;
     uint probeIndex = currentPhase + phaseProbeIndex * phaseCount;
     uint globalRayIndex = probeIndex * raysPerProbe + rayIndex;
+    uint fixedRayCount = min(constants.updateParams.x, raysPerProbe);
+    bool classificationEnabled = (constants.updateParams.z & 2u) != 0u;
+    if (classificationEnabled && probeStates[probeIndex] != 0u && rayIndex >= fixedRayCount) {
+        // Inactive probes still trace their fixed rays so classification and
+        // relocation keep receiving stable backface/near-hit evidence. Only the
+        // non-fixed rotated rays are skipped because those rays mainly feed
+        // radiance blending, and inactive probes are ignored by lighting.
+        probeRayData[globalRayIndex].radianceAndDistance = vec4(0.0, 0.0, 0.0, 1.0e27);
+        probeRayData[globalRayIndex].directionAndDistanceSquared = vec4(0.0, 1.0, 0.0, 1.0e27);
+        probeRayData[globalRayIndex].normalAndFlags = vec4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
 
     uvec3 probeCoord = ddgiProbeCoord(probeIndex, constants.probeCounts.xyz);
     vec3 probeOriginWorld = ddgiProbeWorldPosition(
@@ -69,13 +88,19 @@ void main()
         constants.probeSpacingAndHysteresis.xyz);
     probeOriginWorld += probeOffsets[probeIndex].xyz;
 
-    float frameRotation = float(constants.probeCounts.w & 1023u) * DDGI_GOLDEN_ANGLE;
+    // The first fixedRayCount rays keep stable directions across frames. These
+    // fixed rays are reserved for relocation/classification so those decisions
+    // do not inherit temporal noise from the randomly rotated blending rays.
+    float frameRotation = rayIndex < fixedRayCount ? 0.0 : float(constants.probeCounts.w & 1023u) * DDGI_GOLDEN_ANGLE;
     vec3 rayDirectionWorld = ddgiFibonacciDirection(rayIndex, raysPerProbe, frameRotation);
 
     payload.radiance = vec3(0.0);
-    payload.distance = 1.0e27;
+    float maxRayDistance = max(constants.traceParams.x, 1.0);
+    payload.distance = maxRayDistance;
     payload.direction = rayDirectionWorld;
     payload.distanceSquared = payload.distance * payload.distance;
+    payload.normal = vec3(0.0);
+    payload.flags = 0.0;
 
     // Ray flags keep the first implementation simple: opaque triangle hits only.
     // Any-hit/material alpha support can be added after scene material buffers
@@ -90,9 +115,10 @@ void main()
         probeOriginWorld,
         0.01,
         rayDirectionWorld,
-        1.0e27,
+        maxRayDistance,
         0);
 
     probeRayData[globalRayIndex].radianceAndDistance = vec4(payload.radiance, payload.distance);
     probeRayData[globalRayIndex].directionAndDistanceSquared = vec4(rayDirectionWorld, payload.distanceSquared);
+    probeRayData[globalRayIndex].normalAndFlags = vec4(payload.normal, payload.flags);
 }

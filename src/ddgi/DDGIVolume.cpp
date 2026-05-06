@@ -34,6 +34,18 @@ uint32_t probesInUpdatePhase(const DDGIVolumeDesc& desc, uint32_t frameIndex)
     return ((probeCount - 1u - phaseIndex) / phaseCount) + 1u;
 }
 
+uint32_t updateFlags(const DDGIVolumeDesc& desc)
+{
+    uint32_t flags = 0u;
+    if (desc.relocationEnabled) {
+        flags |= static_cast<uint32_t>(RelocationEnabled);
+    }
+    if (desc.classificationEnabled) {
+        flags |= static_cast<uint32_t>(ClassificationEnabled);
+    }
+    return flags;
+}
+
 glm::uvec3 probeCoordinateFromIndex(uint32_t probeIndex, const glm::uvec3& probeCounts)
 {
     const uint32_t countX = std::max(1u, probeCounts.x);
@@ -118,11 +130,13 @@ void createRtSceneDescriptors(vkm::VKMDevice& device,
         return;
     }
 
-    vk::DescriptorPoolSize poolSize{};
-    poolSize.setType(vk::DescriptorType::eAccelerationStructureKHR).setDescriptorCount(1);
+    std::array<vk::DescriptorPoolSize, 2> poolSizes{
+        vk::DescriptorPoolSize{vk::DescriptorType::eAccelerationStructureKHR, 1u},
+        vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 4u},
+    };
 
     vk::DescriptorPoolCreateInfo poolCreateInfo{};
-    poolCreateInfo.setMaxSets(1).setPoolSizeCount(1).setPPoolSizes(&poolSize);
+    poolCreateInfo.setMaxSets(1).setPoolSizes(poolSizes);
     VK_CHECK_RESULT(device.logicalDevice.createDescriptorPool(&poolCreateInfo, nullptr, &descriptorPool));
 
     vk::DescriptorSetAllocateInfo allocateInfo{};
@@ -132,22 +146,45 @@ void createRtSceneDescriptors(vkm::VKMDevice& device,
 
 void updateRtSceneDescriptor(vk::Device logicalDevice,
                              vk::DescriptorSet descriptorSet,
-                             vk::AccelerationStructureKHR topLevelAccelerationStructure)
+                             const rt::RayTracingScene& scene)
 {
-    if (descriptorSet == VK_NULL_HANDLE || topLevelAccelerationStructure == VK_NULL_HANDLE) {
+    if (descriptorSet == VK_NULL_HANDLE ||
+        scene.topLevelAccelerationStructure == VK_NULL_HANDLE ||
+        scene.gpuData == nullptr ||
+        !scene.gpuData->isCreated()) {
         return;
     }
 
     vk::WriteDescriptorSetAccelerationStructureKHR accelerationStructureWrite{};
-    accelerationStructureWrite.setAccelerationStructures(topLevelAccelerationStructure);
+    accelerationStructureWrite.setAccelerationStructures(scene.topLevelAccelerationStructure);
 
-    vk::WriteDescriptorSet writeDescriptorSet{};
-    writeDescriptorSet.setDstSet(descriptorSet)
+    std::array<vk::DescriptorBufferInfo, 4> bufferInfos{
+        scene.gpuData->vertexAttributeDescriptor(),
+        scene.gpuData->indexDescriptor(),
+        scene.gpuData->meshDescriptor(),
+        scene.gpuData->materialDescriptor(),
+    };
+
+    std::array<vk::WriteDescriptorSet, 5> descriptorWrites{};
+    descriptorWrites[0].setDstSet(descriptorSet)
         .setDstBinding(0)
         .setDescriptorCount(1)
         .setDescriptorType(vk::DescriptorType::eAccelerationStructureKHR)
         .setPNext(&accelerationStructureWrite);
-    logicalDevice.updateDescriptorSets(writeDescriptorSet, {});
+
+    for (uint32_t writeIndex = 1u; writeIndex < descriptorWrites.size(); ++writeIndex) {
+        descriptorWrites[writeIndex].setDstSet(descriptorSet)
+            .setDstBinding(writeIndex)
+            .setDescriptorCount(1)
+            .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+            .setPBufferInfo(&bufferInfos[writeIndex - 1u]);
+    }
+
+    // The RT scene descriptor set is updated only when the TLAS changes. These
+    // storage buffers are immutable for the loaded scene, so the closest-hit
+    // shader can reconstruct material factors without touching vulkan_base's
+    // glTF descriptors or requiring bindless textures.
+    logicalDevice.updateDescriptorSets(descriptorWrites, {});
 }
 
 } // namespace
@@ -190,6 +227,7 @@ void DDGIVolume::destroy()
     pipelineSet.destroy();
     resourceSet.destroy();
     boundTopLevelAccelerationStructure = VK_NULL_HANDLE;
+    clearRequested = false;
     device = nullptr;
 }
 
@@ -211,7 +249,30 @@ void DDGIVolume::updateConstants(const Camera& camera, uint32_t frameIndex)
         resourceSet.textures().probeTileRows,
         desc.irradianceOctSize,
         desc.depthOctSize);
+    constants.traceParams = glm::vec4(
+        desc.maxRayDistance,
+        desc.irradianceGamma,
+        desc.distanceExponent,
+        0.0f);
+    constants.stabilityParams = glm::vec4(
+        desc.probeChangeThreshold,
+        desc.probeBrightnessThreshold,
+        desc.probeBackfaceThreshold,
+        desc.probeMinFrontfaceDistance);
+    constants.updateParams = glm::uvec4(
+        std::min(desc.fixedRayCount, desc.raysPerProbe),
+        probeUpdatePhaseCount(desc),
+        updateFlags(desc),
+        clearRequested ? 1u : 0u);
+    constants.scrollAnchorAndMovement = glm::vec4(
+        desc.scrollAnchor,
+        desc.movementType == DDGIMovementType::Scrolling ? 1.0f : 0.0f);
     resourceSet.updateConstants(constants);
+}
+
+void DDGIVolume::requestClearProbes()
+{
+    clearRequested = true;
 }
 
 void DDGIVolume::traceProbeRays(vk::CommandBuffer commandBuffer, const rt::RayTracingScene& scene)
@@ -219,6 +280,8 @@ void DDGIVolume::traceProbeRays(vk::CommandBuffer commandBuffer, const rt::RayTr
     if (!resourceSet.isCreated() ||
         pipelineSet.trace() == VK_NULL_HANDLE ||
         scene.topLevelAccelerationStructure == VK_NULL_HANDLE ||
+        scene.gpuData == nullptr ||
+        !scene.gpuData->isCreated() ||
         rtSceneDescriptorSet == VK_NULL_HANDLE ||
         !traceShaderBindingTable.isCreated()) {
         return;
@@ -228,7 +291,7 @@ void DDGIVolume::traceProbeRays(vk::CommandBuffer commandBuffer, const rt::RayTr
     recordComputeToRayTracingBarrier(commandBuffer, resourceSet.probeOffsets());
     recordComputeToRayTracingBarrier(commandBuffer, resourceSet.probeStates());
     if (boundTopLevelAccelerationStructure != scene.topLevelAccelerationStructure) {
-        updateRtSceneDescriptor(device->logicalDevice, rtSceneDescriptorSet, scene.topLevelAccelerationStructure);
+        updateRtSceneDescriptor(device->logicalDevice, rtSceneDescriptorSet, scene);
         boundTopLevelAccelerationStructure = scene.topLevelAccelerationStructure;
     }
 
@@ -283,13 +346,13 @@ void DDGIVolume::updateProbes(vk::CommandBuffer commandBuffer)
         resourceSet.descriptorSet(),
         {});
 
-    if (pipelineSet.classify() != VK_NULL_HANDLE) {
+    if (desc.classificationEnabled && pipelineSet.classify() != VK_NULL_HANDLE) {
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipelineSet.classify());
         commandBuffer.dispatch(dispatchGroups(resourceSet.totalProbeCount(), 64u), 1u, 1u);
         recordStorageBufferShaderBarrier(commandBuffer, resourceSet.probeStates());
     }
 
-    if (pipelineSet.relocate() != VK_NULL_HANDLE) {
+    if (desc.relocationEnabled && pipelineSet.relocate() != VK_NULL_HANDLE) {
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipelineSet.relocate());
         commandBuffer.dispatch(dispatchGroups(resourceSet.totalProbeCount(), 64u), 1u, 1u);
         recordStorageBufferShaderBarrier(commandBuffer, resourceSet.probeOffsets());
@@ -325,11 +388,25 @@ void DDGIVolume::updateProbes(vk::CommandBuffer commandBuffer)
 
 void DDGIVolume::updateProbesFromSDF(vk::CommandBuffer commandBuffer, const sdf::SDFVolume&)
 {
-    if (!resourceSet.isCreated() || pipelineSet.sdfProbeUpdate() == VK_NULL_HANDLE) {
+    if (!resourceSet.isCreated()) {
         return;
     }
 
     resourceSet.recordInitialLayoutTransitions(commandBuffer);
+
+    if (clearRequested) {
+        // Clearing happens before any per-frame DDGI shader uses the atlases.
+        // This prevents old irradiance/depth from being mixed back through
+        // hysteresis after the user changes temporal parameters or layout.
+        resourceSet.resetProbeBuffers(desc);
+        resourceSet.recordClearAtlases(commandBuffer);
+        clearRequested = false;
+    }
+
+    if (pipelineSet.sdfProbeUpdate() == VK_NULL_HANDLE) {
+        return;
+    }
+
     commandBuffer.bindDescriptorSets(
         vk::PipelineBindPoint::eCompute,
         pipelineSet.layout(),

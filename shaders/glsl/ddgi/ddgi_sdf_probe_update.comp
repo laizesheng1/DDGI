@@ -13,6 +13,10 @@ struct DDGIFrameConstants {
     uvec4 probeCounts;
     vec4 biasAndDebug;
     uvec4 atlasLayout;
+    vec4 traceParams;
+    vec4 stabilityParams;
+    uvec4 updateParams;
+    vec4 scrollAnchorAndMovement;
 };
 
 layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
@@ -41,5 +45,11 @@ void main()
     vec3 maxOffset = constants.probeSpacingAndHysteresis.xyz * 0.45;
     vec3 clampedOffset = clamp(probeOffsets[probeIndex].xyz, -maxOffset, maxOffset);
     probeOffsets[probeIndex] = vec4(clampedOffset, 0.0);
-    probeStates[probeIndex] = DDGI_PROBE_STATE_ACTIVE;
+    if ((constants.updateParams.z & 2u) == 0u) {
+        // When classification is disabled, all probes are forced active so the
+        // debug volume behaves as a pure uniform grid. When classification is
+        // enabled, this pass must not overwrite inactive decisions from the
+        // previous frame because raygen uses them to skip RT work.
+        probeStates[probeIndex] = DDGI_PROBE_STATE_ACTIVE;
+    }
 }

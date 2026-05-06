@@ -1,5 +1,6 @@
 #include "debug/DebugUI.h"
 
+#include <algorithm>
 #include <array>
 #include <format>
 
@@ -7,6 +8,7 @@ namespace debug {
 namespace {
 
 constexpr std::array<uint32_t, 5> kRaysPerProbeOptions{16u, 32u, 64u, 128u, 256u};
+constexpr std::array<uint32_t, 4> kUpdatePhaseOptions{1u, 2u, 4u, 8u};
 
 int32_t raysPerProbeOptionIndex(uint32_t raysPerProbe)
 {
@@ -16,6 +18,16 @@ int32_t raysPerProbeOptionIndex(uint32_t raysPerProbe)
         }
     }
     return 3;
+}
+
+int32_t updatePhaseOptionIndex(uint32_t phaseCount)
+{
+    for (size_t optionIndex = 0; optionIndex < kUpdatePhaseOptions.size(); ++optionIndex) {
+        if (kUpdatePhaseOptions[optionIndex] == phaseCount) {
+            return static_cast<int32_t>(optionIndex);
+        }
+    }
+    return 2;
 }
 
 } // namespace
@@ -31,19 +43,37 @@ void DebugUI::draw(vkm::HUD* ui, DebugUIState& state)
         ui->checkBox("Show atlas window", &state.showAtlasWindow);
         ui->checkBox("Show radiance stats", &state.showProbeRadianceStats);
         ui->checkBox("Auto fit scene bounds", &state.autoFitProbesToSceneBounds);
+        ui->checkBox("Relocation", &state.relocationEnabled);
+        ui->checkBox("Classification", &state.classificationEnabled);
         ui->sliderFloat("Probe density", &state.probeDensity, 0.25f, 3.0f);
+        ui->sliderFloat("History weight", &state.hysteresis, 0.0f, 0.99f);
+        ui->inputFloat("Max ray distance", &state.maxRayDistance, 1.0f, 1);
 
         int32_t raysPerProbeOption = raysPerProbeOptionIndex(state.raysPerProbe);
         if (ui->comboBox("Rays per probe", &raysPerProbeOption, {"16", "32", "64", "128", "256"})) {
             state.raysPerProbe = kRaysPerProbeOptions[static_cast<size_t>(raysPerProbeOption)];
+            state.fixedRayCount = (std::min)(state.fixedRayCount, state.raysPerProbe);
+        }
+
+        int32_t fixedRayOption = raysPerProbeOptionIndex(state.fixedRayCount);
+        if (ui->comboBox("Fixed rays", &fixedRayOption, {"16", "32", "64", "128", "256"})) {
+            state.fixedRayCount = (std::min)(kRaysPerProbeOptions[static_cast<size_t>(fixedRayOption)], state.raysPerProbe);
+        }
+
+        int32_t phaseOption = updatePhaseOptionIndex(state.probeUpdatePhaseCount);
+        if (ui->comboBox("Update phases", &phaseOption, {"1", "2", "4", "8"})) {
+            state.probeUpdatePhaseCount = kUpdatePhaseOptions[static_cast<size_t>(phaseOption)];
         }
 
         int32_t distributionMode = static_cast<int32_t>(state.distributionMode);
         if (ui->comboBox("Probe distribution", &distributionMode, {"UniformInSceneBounds", "ManualVolume"})) {
             state.distributionMode = static_cast<ProbeDistributionMode>(distributionMode);
         }
-        if (ui->button("Apply probe layout")) {
+        if (ui->button("Apply DDGI settings")) {
             state.requestApplyProbeLayout = true;
+        }
+        if (ui->button("Clear probe history")) {
+            state.requestClearProbes = true;
         }
 
         // The bundled HUD wrapper only exposes interactive widgets. Reusing a

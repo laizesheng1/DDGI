@@ -1,4 +1,4 @@
-﻿#include "scene/SceneGpuData.h"
+#include "scene/SceneGpuData.h"
 
 #include <algorithm>
 #include <array>
@@ -19,6 +19,9 @@ namespace {
 struct CompactGeometryData {
     std::vector<glm::vec3> positions{};
     std::vector<uint32_t> indices{};
+    std::vector<SceneRtVertexAttributeGpuData> vertexAttributes{};
+    std::vector<SceneRtMeshGpuData> meshGpuData{};
+    std::vector<SceneRtMaterialGpuData> materialGpuData{};
     std::vector<SceneMesh> meshes{};
 };
 
@@ -86,6 +89,35 @@ glm::vec3 readVec3(const tinygltf::Model& model, const tinygltf::Accessor& acces
     return value;
 }
 
+glm::vec3 safeReadNormal(const tinygltf::Model& model,
+                         const tinygltf::Primitive& primitive,
+                         size_t vertexIndex,
+                         const glm::mat3& normalFromLocal)
+{
+    const auto normalIt = primitive.attributes.find("NORMAL");
+    if (normalIt == primitive.attributes.end()) {
+        return glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+
+    const tinygltf::Accessor& normalAccessor = model.accessors[normalIt->second];
+    const glm::vec3 normalLocal = readVec3(model, normalAccessor, vertexIndex);
+    const glm::vec3 normalWorld = normalFromLocal * normalLocal;
+    const float normalLength = glm::length(normalWorld);
+    return normalLength > 1.0e-5f ? normalWorld / normalLength : glm::vec3(0.0f, 1.0f, 0.0f);
+}
+
+glm::vec2 safeReadTexCoord(const tinygltf::Model& model,
+                           const tinygltf::Primitive& primitive,
+                           size_t vertexIndex)
+{
+    const auto texCoordIt = primitive.attributes.find("TEXCOORD_0");
+    if (texCoordIt == primitive.attributes.end()) {
+        return glm::vec2(0.0f);
+    }
+
+    return readVec2(model, model.accessors[texCoordIt->second], vertexIndex);
+}
+
 glm::vec4 readVec4(const tinygltf::Model& model, const tinygltf::Accessor& accessor, size_t vertexIndex)
 {
     const tinygltf::BufferView& bufferView = model.bufferViews[accessor.bufferView];
@@ -143,6 +175,7 @@ void appendNodeGeometry(const tinygltf::Model& model,
 {
     const tinygltf::Node& node = model.nodes[nodeIndex];
     const glm::mat4 worldFromLocal = parentWorldFromLocal * makeNodeLocalMatrix(node);
+    const glm::mat3 normalFromLocal = glm::transpose(glm::inverse(glm::mat3(worldFromLocal)));
 
     // Match vulkan_base/glTFModel.cpp traversal so primitive ordering stays
     // consistent with Scene::meshList and future debug output.
@@ -173,9 +206,18 @@ void appendNodeGeometry(const tinygltf::Model& model,
         for (size_t vertexIndex = 0; vertexIndex < positionAccessor.count; ++vertexIndex) {
             const glm::vec3 positionLocal = readVec3(model, positionAccessor, vertexIndex);
             const glm::vec3 positionWorld = glm::vec3(worldFromLocal * glm::vec4(positionLocal, 1.0f));
+            const glm::vec3 normalWorld = safeReadNormal(model, primitive, vertexIndex, normalFromLocal);
+            const glm::vec2 texCoord = safeReadTexCoord(model, primitive, vertexIndex);
             worldMin = glm::min(worldMin, positionWorld);
             worldMax = glm::max(worldMax, positionWorld);
             output.positions.push_back(positionWorld);
+
+            SceneRtVertexAttributeGpuData vertexAttribute{};
+            vertexAttribute.normalAndMaterial = glm::vec4(
+                normalWorld,
+                primitive.material >= 0 ? static_cast<float>(primitive.material) : 0.0f);
+            vertexAttribute.uvAndFlags = glm::vec4(texCoord, 0.0f, 0.0f);
+            output.vertexAttributes.push_back(vertexAttribute);
         }
 
         // Keep compact RT indices local to this primitive's vertex range. BLAS
@@ -184,6 +226,7 @@ void appendNodeGeometry(const tinygltf::Model& model,
         const std::vector<uint32_t> primitiveIndices = readIndices(model, model.accessors[primitive.indices]);
         if (primitiveIndices.empty()) {
             output.positions.resize(firstVertex);
+            output.vertexAttributes.resize(firstVertex);
             continue;
         }
 
@@ -195,6 +238,7 @@ void appendNodeGeometry(const tinygltf::Model& model,
                 static_cast<uint32_t>(positionAccessor.count),
                 primitive.material >= 0 ? primitive.material : -1);
             output.positions.resize(firstVertex);
+            output.vertexAttributes.resize(firstVertex);
             continue;
         }
         output.indices.insert(output.indices.end(), primitiveIndices.begin(), primitiveIndices.end());
@@ -209,7 +253,56 @@ void appendNodeGeometry(const tinygltf::Model& model,
         sceneMesh.maxBounds = worldMax;
         sceneMesh.centroid = (worldMin + worldMax) * 0.5f;
         output.meshes.push_back(sceneMesh);
+
+        SceneRtMeshGpuData meshGpuData{};
+        meshGpuData.firstIndexFirstVertexMaterialFlags = glm::uvec4(
+            sceneMesh.firstIndex,
+            sceneMesh.firstVertex,
+            sceneMesh.materialIndex,
+            0u);
+        output.meshGpuData.push_back(meshGpuData);
     }
+}
+
+std::vector<SceneRtMaterialGpuData> loadMaterialFactors(const tinygltf::Model& model)
+{
+    std::vector<SceneRtMaterialGpuData> materials{};
+    materials.reserve(std::max<size_t>(model.materials.size(), 1u));
+
+    for (const tinygltf::Material& sourceMaterial : model.materials) {
+        SceneRtMaterialGpuData material{};
+
+        const tinygltf::PbrMetallicRoughness& pbr = sourceMaterial.pbrMetallicRoughness;
+        if (pbr.baseColorFactor.size() == 4u) {
+            material.baseColorAndAlphaCutoff = glm::vec4(
+                static_cast<float>(pbr.baseColorFactor[0]),
+                static_cast<float>(pbr.baseColorFactor[1]),
+                static_cast<float>(pbr.baseColorFactor[2]),
+                static_cast<float>(sourceMaterial.alphaCutoff));
+        }
+
+        if (sourceMaterial.emissiveFactor.size() == 3u) {
+            material.emissiveAndFlags = glm::vec4(
+                static_cast<float>(sourceMaterial.emissiveFactor[0]),
+                static_cast<float>(sourceMaterial.emissiveFactor[1]),
+                static_cast<float>(sourceMaterial.emissiveFactor[2]),
+                0.0f);
+        }
+
+        uint32_t materialFlags = 0u;
+        if (sourceMaterial.alphaMode == "MASK") {
+            materialFlags |= 1u;
+        } else if (sourceMaterial.alphaMode == "BLEND") {
+            materialFlags |= 2u;
+        }
+        material.emissiveAndFlags.w = static_cast<float>(materialFlags);
+        materials.push_back(material);
+    }
+
+    if (materials.empty()) {
+        materials.push_back(SceneRtMaterialGpuData{});
+    }
+    return materials;
 }
 
 CompactGeometryData loadCompactGeometryFromGltf(const std::string& filename)
@@ -233,6 +326,8 @@ CompactGeometryData loadCompactGeometryFromGltf(const std::string& filename)
         OutputMessage("[SceneGpuData] glTF file {} has no scenes\n", filename);
         return output;
     }
+
+    output.materialGpuData = loadMaterialFactors(gltfModel);
 
     const int defaultSceneIndex = gltfModel.defaultScene >= 0 ? gltfModel.defaultScene : 0;
     const tinygltf::Scene& defaultScene = gltfModel.scenes[defaultSceneIndex];
@@ -312,6 +407,9 @@ void SceneGpuData::create(vkm::VKMDevice* inDevice, const Scene& scene, vk::Queu
     CompactGeometryData compactGeometry = loadCompactGeometryFromGltf(scene.sourcePath());
     compactPositions = compactGeometry.positions;
     compactIndices = compactGeometry.indices;
+    compactVertexAttributes = compactGeometry.vertexAttributes;
+    compactMeshGpuData = compactGeometry.meshGpuData;
+    compactMaterialGpuData = compactGeometry.materialGpuData;
     compactMeshes = compactGeometry.meshes;
     if (compactMeshes.size() != scene.meshes().size()) {
         OutputMessage(
@@ -347,6 +445,27 @@ void SceneGpuData::create(vkm::VKMDevice* inDevice, const Scene& scene, vk::Queu
             vk::BufferUsageFlagBits::eShaderDeviceAddress |
             vk::BufferUsageFlagBits::eAccelerationStructureBuildInputReadOnlyKHR |
             vk::BufferUsageFlagBits::eIndexBuffer);
+    createUploadBuffer(
+        *device,
+        transferQueue,
+        rtVertexAttributeBuffer,
+        compactVertexAttributes.data(),
+        static_cast<vk::DeviceSize>(compactVertexAttributes.size() * sizeof(SceneRtVertexAttributeGpuData)),
+        vk::BufferUsageFlagBits::eStorageBuffer);
+    createUploadBuffer(
+        *device,
+        transferQueue,
+        rtMeshBuffer,
+        compactMeshGpuData.data(),
+        static_cast<vk::DeviceSize>(compactMeshGpuData.size() * sizeof(SceneRtMeshGpuData)),
+        vk::BufferUsageFlagBits::eStorageBuffer);
+    createUploadBuffer(
+        *device,
+        transferQueue,
+        rtMaterialBuffer,
+        compactMaterialGpuData.data(),
+        static_cast<vk::DeviceSize>(compactMaterialGpuData.size() * sizeof(SceneRtMaterialGpuData)),
+        vk::BufferUsageFlagBits::eStorageBuffer);
 
     positionBufferDeviceAddress = getBufferDeviceAddress(device->logicalDevice, rtPositionBuffer.buffer);
     indexBufferDeviceAddress = getBufferDeviceAddress(device->logicalDevice, rtIndexBuffer.buffer);
@@ -359,9 +478,21 @@ void SceneGpuData::create(vkm::VKMDevice* inDevice, const Scene& scene, vk::Queu
     indexBufferInfo.setBuffer(rtIndexBuffer.buffer)
         .setOffset(0)
         .setRange(static_cast<vk::DeviceSize>(indexCount) * sizeof(uint32_t));
+    vertexAttributeBufferInfo.setBuffer(rtVertexAttributeBuffer.buffer)
+        .setOffset(0)
+        .setRange(static_cast<vk::DeviceSize>(compactVertexAttributes.size() * sizeof(SceneRtVertexAttributeGpuData)));
+    meshBufferInfo.setBuffer(rtMeshBuffer.buffer)
+        .setOffset(0)
+        .setRange(static_cast<vk::DeviceSize>(compactMeshGpuData.size() * sizeof(SceneRtMeshGpuData)));
+    materialBufferInfo.setBuffer(rtMaterialBuffer.buffer)
+        .setOffset(0)
+        .setRange(static_cast<vk::DeviceSize>(compactMaterialGpuData.size() * sizeof(SceneRtMaterialGpuData)));
 
     created = positionBufferInfo.buffer != VK_NULL_HANDLE &&
         indexBufferInfo.buffer != VK_NULL_HANDLE &&
+        vertexAttributeBufferInfo.buffer != VK_NULL_HANDLE &&
+        meshBufferInfo.buffer != VK_NULL_HANDLE &&
+        materialBufferInfo.buffer != VK_NULL_HANDLE &&
         positionBufferDeviceAddress != 0 &&
         indexBufferDeviceAddress != 0 &&
         !compactMeshes.empty();
@@ -380,13 +511,22 @@ void SceneGpuData::create(vkm::VKMDevice* inDevice, const Scene& scene, vk::Queu
 
 void SceneGpuData::destroy()
 {
+    rtMaterialBuffer.destroy();
+    rtMeshBuffer.destroy();
+    rtVertexAttributeBuffer.destroy();
     rtIndexBuffer.destroy();
     rtPositionBuffer.destroy();
     compactPositions.clear();
     compactIndices.clear();
+    compactVertexAttributes.clear();
+    compactMeshGpuData.clear();
+    compactMaterialGpuData.clear();
     compactMeshes.clear();
     positionBufferInfo = vk::DescriptorBufferInfo{};
     indexBufferInfo = vk::DescriptorBufferInfo{};
+    vertexAttributeBufferInfo = vk::DescriptorBufferInfo{};
+    meshBufferInfo = vk::DescriptorBufferInfo{};
+    materialBufferInfo = vk::DescriptorBufferInfo{};
     positionBufferDeviceAddress = 0;
     indexBufferDeviceAddress = 0;
     vertexCount = 0u;

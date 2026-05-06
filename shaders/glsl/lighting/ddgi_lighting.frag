@@ -27,6 +27,10 @@ struct DDGIFrameConstants {
     uvec4 probeCounts;
     vec4 biasAndDebug;
     uvec4 atlasLayout;
+    vec4 traceParams;
+    vec4 stabilityParams;
+    uvec4 updateParams;
+    vec4 scrollAnchorAndMovement;
 };
 
 layout(set = 1, binding = 0) uniform DDGIConstantsBuffer {
@@ -36,6 +40,10 @@ layout(set = 1, binding = 0) uniform DDGIConstantsBuffer {
 layout(set = 1, binding = 4, rgba16f) readonly uniform image2D irradianceAtlas;
 layout(set = 1, binding = 5, r32f) readonly uniform image2D depthAtlas;
 layout(set = 1, binding = 6, r32f) readonly uniform image2D depthSquaredAtlas;
+
+layout(set = 1, binding = 3, std430) readonly buffer ProbeStatesBuffer {
+    uint probeStates[];
+};
 
 float ddgiLoadDepthMoment(uint probeIndex, vec3 probeToSurfaceDirection, bool squaredMoment)
 {
@@ -56,7 +64,10 @@ vec3 ddgiLoadIrradiance(uint probeIndex, vec3 surfaceNormalWorld)
     vec2 octUv = ddgiOctEncode(surfaceNormalWorld);
     uvec2 octTexel = uvec2(clamp(floor(octUv * float(octSize)), vec2(0.0), vec2(float(octSize - 1u))));
     ivec2 atlasTexel = ivec2(ddgiAtlasInteriorTexel(probeIndex, octTexel, constants.atlasLayout.x, tileSize));
-    return imageLoad(irradianceAtlas, atlasTexel).rgb;
+    float irradianceGamma = max(constants.traceParams.y, 1.0);
+    // Irradiance atlas is gamma-encoded by the update pass for stability and
+    // precision. Lighting consumes linear irradiance, so decode at query time.
+    return pow(max(imageLoad(irradianceAtlas, atlasTexel).rgb, vec3(0.0)), vec3(irradianceGamma));
 }
 
 float ddgiChebyshevVisibility(float receiverDistance, float meanDistance, float meanDistanceSquared)
@@ -91,6 +102,9 @@ vec3 ddgiQueryIndirectDiffuse(vec3 surfacePositionWorld, vec3 surfaceNormalWorld
         uvec3 probeCoord = uvec3(baseCell) + cornerOffset;
         probeCoord = min(probeCoord, constants.probeCounts.xyz - uvec3(1u));
         uint probeIndex = ddgiProbeIndex(probeCoord, constants.probeCounts.xyz);
+        if (((constants.updateParams.z & 2u) != 0u) && probeStates[probeIndex] != 0u) {
+            continue;
+        }
 
         vec3 probePositionWorld = ddgiProbeWorldPosition(
             probeCoord,

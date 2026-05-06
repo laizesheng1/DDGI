@@ -17,11 +17,16 @@ struct DDGIFrameConstants {
     uvec4 probeCounts;
     vec4 biasAndDebug;
     uvec4 atlasLayout;
+    vec4 traceParams;
+    vec4 stabilityParams;
+    uvec4 updateParams;
+    vec4 scrollAnchorAndMovement;
 };
 
 struct DDGIProbeRayData {
     vec4 radianceAndDistance;
     vec4 directionAndDistanceSquared;
+    vec4 normalAndFlags;
 };
 
 layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
@@ -44,7 +49,7 @@ void main()
         return;
     }
 
-    uint phaseCount = ddgiProbeUpdatePhaseCount(constants.biasAndDebug.w);
+    uint phaseCount = max(constants.updateParams.y, 1u);
     if (!ddgiProbeInUpdatePhase(probeIndex, constants.probeCounts.w, phaseCount)) {
         return;
     }
@@ -52,21 +57,35 @@ void main()
     uint raysPerProbe = max(uint(constants.volumeOriginAndRays.w), 1u);
     float nearGeometryDistance = max(constants.biasAndDebug.z, 0.0);
     uint nearHitCount = 0u;
+    uint backfaceHitCount = 0u;
     uint finiteHitCount = 0u;
     uint rayBaseIndex = probeIndex * raysPerProbe;
+    uint classificationRayCount = min(constants.updateParams.x, raysPerProbe);
+    if (classificationRayCount == 0u) {
+        classificationRayCount = raysPerProbe;
+    }
 
-    for (uint rayIndex = 0u; rayIndex < raysPerProbe; ++rayIndex) {
-        float hitDistance = probeRayData[rayBaseIndex + rayIndex].radianceAndDistance.w;
+    for (uint rayIndex = 0u; rayIndex < classificationRayCount; ++rayIndex) {
+        DDGIProbeRayData rayData = probeRayData[rayBaseIndex + rayIndex];
+        float hitDistance = rayData.radianceAndDistance.w;
+        uint flags = uint(rayData.normalAndFlags.w + 0.5);
         if (hitDistance < 1.0e20) {
             finiteHitCount += 1u;
         }
         if (hitDistance < nearGeometryDistance) {
             nearHitCount += 1u;
         }
+        if ((flags & 2u) != 0u) {
+            backfaceHitCount += 1u;
+        }
     }
 
-    float nearHitRatio = float(nearHitCount) / float(raysPerProbe);
-    bool mostlyInsideGeometry = nearHitRatio > 0.35;
+    float nearHitRatio = float(nearHitCount) / float(classificationRayCount);
+    float backfaceRatio = float(backfaceHitCount) / float(classificationRayCount);
+    // Backface-heavy fixed rays are a strong hint that a probe is inside
+    // closed geometry. Near-hit ratio remains as a conservative fallback for
+    // assets with unreliable normals while the material path is still young.
+    bool mostlyInsideGeometry = backfaceRatio > constants.stabilityParams.z || nearHitRatio > 0.35;
     bool neverSeesScene = finiteHitCount == 0u;
     probeStates[probeIndex] = mostlyInsideGeometry && !neverSeesScene
         ? DDGI_PROBE_STATE_INACTIVE

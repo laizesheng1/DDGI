@@ -22,10 +22,13 @@ enum class DDGIResourceBinding : uint32_t {
  * One traced ray result for a probe.
  * radianceAndDistance.xyz stores incoming radiance and .w stores hit distance.
  * directionAndDistanceSquared.xyz stores world ray direction and .w stores d^2.
+ * normalAndFlags.xyz stores the closest-hit shading normal and .w stores
+ * hit/miss/frontface flags used by classification and relocation.
  */
 struct DDGIProbeRayGpuData {
     glm::vec4 radianceAndDistance{0.0f};
     glm::vec4 directionAndDistanceSquared{0.0f};
+    glm::vec4 normalAndFlags{0.0f};
 };
 
 /**
@@ -83,10 +86,24 @@ public:
     void updateConstants(const DDGIFrameConstants& constants);
 
     /**
+     * Reset host-visible probe buffers to a known empty state.
+     * This is used when the user changes temporal/DDGI parameters and wants to
+     * discard stale history without recreating the full Vulkan resource set.
+     */
+    void resetProbeBuffers(const DDGIVolumeDesc& desc);
+
+    /**
      * Transition DDGI atlases from Undefined to General before shader access.
      * commandBuffer must be recording.
      */
     void recordInitialLayoutTransitions(vk::CommandBuffer commandBuffer);
+
+    /**
+     * Clear all atlas images inside the current frame command buffer.
+     * The images must already be in General layout because DDGI keeps them as
+     * storage images across trace/update/lighting passes.
+     */
+    void recordClearAtlases(vk::CommandBuffer commandBuffer) const;
 
     /**
      * Synchronize probeRayData shader writes before compute update reads it.

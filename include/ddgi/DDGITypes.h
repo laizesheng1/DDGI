@@ -8,6 +8,16 @@
 
 namespace ddgi {
 
+enum class DDGIMovementType : uint32_t {
+    Static = 0,
+    Scrolling = 1
+};
+
+enum DDGIUpdateFlags : uint32_t {
+    RelocationEnabled = 1u << 0u,
+    ClassificationEnabled = 1u << 1u
+};
+
 struct DDGIVolumeDesc {
     glm::vec3 origin{-8.0f, 1.0f, -8.0f};
     glm::vec3 probeSpacing{2.0f, 2.0f, 2.0f};
@@ -23,6 +33,24 @@ struct DDGIVolumeDesc {
     float normalBias{0.20f};
     float viewBias{0.10f};
     float sdfProbePushDistance{0.35f};
+    // First-stage stability controls. They mirror RTXGI concepts but remain
+    // intentionally simple until material-aware hit shading and true
+    // relocation/classification are finished.
+    float maxRayDistance{1000.0f};
+    float irradianceGamma{5.0f};
+    float distanceExponent{32.0f};
+    float probeChangeThreshold{0.20f};
+    float probeBrightnessThreshold{2.00f};
+    // Fixed rays keep deterministic directions for classification/relocation.
+    // Atlas blending skips them when possible so lighting still benefits from
+    // temporally rotated probe rays.
+    uint32_t fixedRayCount{16u};
+    float probeBackfaceThreshold{0.25f};
+    float probeMinFrontfaceDistance{0.20f};
+    bool relocationEnabled{false};
+    bool classificationEnabled{true};
+    DDGIMovementType movementType{DDGIMovementType::Static};
+    glm::vec3 scrollAnchor{0.0f};
 };
 
 struct DDGIFrameConstants {
@@ -34,6 +62,10 @@ struct DDGIFrameConstants {
     glm::uvec4 probeCounts{0u};
     glm::vec4 biasAndDebug{0.0f};
     glm::uvec4 atlasLayout{0u};
+    glm::vec4 traceParams{0.0f};
+    glm::vec4 stabilityParams{0.0f};
+    glm::uvec4 updateParams{0u};
+    glm::vec4 scrollAnchorAndMovement{0.0f};
 };
 
 enum class DebugTexture {

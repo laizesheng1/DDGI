@@ -14,11 +14,16 @@ struct DDGIFrameConstants {
     uvec4 probeCounts;
     vec4 biasAndDebug;
     uvec4 atlasLayout;
+    vec4 traceParams;
+    vec4 stabilityParams;
+    uvec4 updateParams;
+    vec4 scrollAnchorAndMovement;
 };
 
 struct DDGIProbeRayData {
     vec4 radianceAndDistance;
     vec4 directionAndDistanceSquared;
+    vec4 normalAndFlags;
 };
 
 layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
@@ -65,7 +70,7 @@ void main()
         return;
     }
 
-    uint phaseCount = ddgiProbeUpdatePhaseCount(constants.biasAndDebug.w);
+    uint phaseCount = max(constants.updateParams.y, 1u);
     if (!ddgiProbeInUpdatePhase(probeIndex, constants.probeCounts.w, phaseCount)) {
         return;
     }
@@ -76,10 +81,15 @@ void main()
     float accumulatedDistance = 0.0;
     float accumulatedWeight = 0.0;
     uint rayBaseIndex = probeIndex * raysPerProbe;
-    for (uint rayIndex = 0u; rayIndex < raysPerProbe; ++rayIndex) {
+    uint firstBlendRay = min(constants.updateParams.x, raysPerProbe);
+    if (firstBlendRay >= raysPerProbe) {
+        firstBlendRay = 0u;
+    }
+    float distanceExponent = max(constants.traceParams.z, 1.0);
+    for (uint rayIndex = firstBlendRay; rayIndex < raysPerProbe; ++rayIndex) {
         DDGIProbeRayData rayData = probeRayData[rayBaseIndex + rayIndex];
         vec3 rayDirection = ddgiSafeNormalize(rayData.directionAndDistanceSquared.xyz);
-        float cosineWeight = pow(max(dot(texelDirection, rayDirection), 0.0), 32.0);
+        float cosineWeight = pow(max(dot(texelDirection, rayDirection), 0.0), distanceExponent);
         accumulatedDistance += rayData.radianceAndDistance.w * cosineWeight;
         accumulatedWeight += cosineWeight;
     }

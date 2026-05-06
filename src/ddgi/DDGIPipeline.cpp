@@ -186,14 +186,20 @@ void DDGIPipeline::create(vkm::VKMDevice* inDevice,
 
     const rt::RayTracingSupport rayTracingSupport = rt::RayTracingContext::querySupport(device->physicalDevice, device->supportedExtensions);
     if (rayTracingSupport.supported) {
-        vk::DescriptorSetLayoutBinding tlasBinding{};
-        tlasBinding.setBinding(0)
+        std::array<vk::DescriptorSetLayoutBinding, 5> sceneBindings{};
+        sceneBindings[0].setBinding(0)
             .setDescriptorType(vk::DescriptorType::eAccelerationStructureKHR)
             .setDescriptorCount(1)
             .setStageFlags(vk::ShaderStageFlagBits::eRaygenKHR | vk::ShaderStageFlagBits::eClosestHitKHR);
+        for (uint32_t bindingIndex = 1u; bindingIndex < sceneBindings.size(); ++bindingIndex) {
+            sceneBindings[bindingIndex].setBinding(bindingIndex)
+                .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+                .setDescriptorCount(1)
+                .setStageFlags(vk::ShaderStageFlagBits::eClosestHitKHR);
+        }
 
         vk::DescriptorSetLayoutCreateInfo sceneLayoutCreateInfo{};
-        sceneLayoutCreateInfo.setBindings(tlasBinding);
+        sceneLayoutCreateInfo.setBindings(sceneBindings);
         VK_CHECK_RESULT(device->logicalDevice.createDescriptorSetLayout(&sceneLayoutCreateInfo, nullptr, &rtSceneSetLayout));
     }
 
