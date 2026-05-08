@@ -18,6 +18,9 @@ struct DDGIFrameConstants {
     vec4 stabilityParams;
     uvec4 updateParams;
     vec4 scrollAnchorAndMovement;
+    vec4 sdfOriginAndMaxDistance;
+    vec4 sdfVoxelSizeAndClearance;
+    uvec4 sdfResolutionAndFlags;
 };
 
 struct DDGIProbeRayData {
@@ -83,7 +86,7 @@ void main()
     uint rayBaseIndex = probeIndex * raysPerProbe;
     uint firstBlendRay = min(constants.updateParams.x, raysPerProbe);
     if (firstBlendRay >= raysPerProbe) {
-        firstBlendRay = 0u;
+        return;
     }
     for (uint rayIndex = firstBlendRay; rayIndex < raysPerProbe; ++rayIndex) {
         DDGIProbeRayData rayData = probeRayData[rayBaseIndex + rayIndex];

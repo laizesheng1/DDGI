@@ -123,6 +123,31 @@ void appendSphereMesh(std::vector<ProbeVisualizerSphereVertex>& vertices,
     }
 }
 
+glm::vec4 probeStateColor(uint32_t state)
+{
+    // State zero is the RTXGI active path used by lighting. Non-zero values
+    // remain debug reasons only; the strict classifier currently writes
+    // backface-heavy or no-local-frontface inactive reasons from fixed rays.
+    switch (state) {
+    case ddgi::ProbeStateActive:
+        return glm::vec4(0.10f, 0.85f, 1.00f, 1.0f);
+    case ddgi::ProbeStateInactiveBackface:
+        return glm::vec4(1.00f, 0.28f, 0.08f, 1.0f);
+    case ddgi::ProbeStateInactiveInsideGeometry:
+        return glm::vec4(0.78f, 0.05f, 1.00f, 1.0f);
+    case ddgi::ProbeStateInactiveOutOfBounds:
+        return glm::vec4(0.45f, 0.45f, 0.45f, 1.0f);
+    case ddgi::ProbeStateInactiveNoGeometry:
+        return glm::vec4(0.68f, 0.68f, 0.68f, 1.0f);
+    case ddgi::ProbeStateInactiveNoLocalFrontface:
+        return glm::vec4(1.00f, 0.95f, 0.05f, 1.0f);
+    case ddgi::ProbeStateInactiveOnlyBackface:
+        return glm::vec4(0.95f, 0.12f, 0.02f, 1.0f);
+    default:
+        return glm::vec4(1.00f, 0.0f, 0.0f, 1.0f);
+    }
+}
+
 } // namespace
 
 void ProbeVisualizer::create(vkm::VKMDevice* inDevice, vk::RenderPass renderPass, vk::PipelineCache pipelineCache)
@@ -284,9 +309,13 @@ void ProbeVisualizer::destroy()
     sphereIndexCount = 0u;
     instanceCapacity = 0u;
     cachedProbeCount = 0u;
+    debugReadbackFrameCounter = 0u;
     instanceCpuData.clear();
+    cachedProbeOffsets.clear();
+    cachedProbeStates.clear();
     cachedVolumeDesc = ddgi::DDGIVolumeDesc{};
     instanceDataDirty = true;
+    hasPlacementDebugData = false;
     device = nullptr;
 }
 
@@ -331,6 +360,24 @@ void ProbeVisualizer::draw(vk::CommandBuffer commandBuffer,
     if (layoutChanged) {
         cachedProbeCount = probeCount;
         cachedVolumeDesc = volumeDesc;
+        cachedProbeOffsets.assign(probeCount, glm::vec3(0.0f));
+        cachedProbeStates.assign(probeCount, 0u);
+        hasPlacementDebugData = false;
+        instanceDataDirty = true;
+    }
+
+    constexpr uint32_t kPlacementDebugReadbackInterval = 8u;
+    ++debugReadbackFrameCounter;
+    const bool shouldReadPlacementDebugData =
+        layoutChanged ||
+        !hasPlacementDebugData ||
+        ((debugReadbackFrameCounter % kPlacementDebugReadbackInterval) == 0u);
+    if (shouldReadPlacementDebugData &&
+        volume.readProbePlacementDebugData(cachedProbeOffsets, cachedProbeStates)) {
+        // Offsets and states are small host-visible buffers, so reading them at
+        // a throttled cadence gives useful classification/relocation feedback
+        // without paying the heavy cost of mapping probeRayData every frame.
+        hasPlacementDebugData = true;
         instanceDataDirty = true;
     }
 
@@ -338,15 +385,20 @@ void ProbeVisualizer::draw(vk::CommandBuffer commandBuffer,
         instanceCpuData.resize(probeCount);
         const float sphereRadius = std::min(volumeDesc.probeSpacing.x,
                                             std::min(volumeDesc.probeSpacing.y, volumeDesc.probeSpacing.z)) * 0.10f;
-        const glm::vec4 debugColor(0.10f, 0.85f, 1.00f, 1.0f);
         for (uint32_t probeIndex = 0; probeIndex < probeCount; ++probeIndex) {
-            // Probe instance data is rebuilt only when the lattice changes.
-            // That keeps the overlay aligned with the current volume while
-            // avoiding per-frame CPU readback of DDGI ray buffers.
+            const glm::vec3 localOffset = probeIndex < cachedProbeOffsets.size()
+                ? cachedProbeOffsets[probeIndex]
+                : glm::vec3(0.0f);
+            const uint32_t state = probeIndex < cachedProbeStates.size()
+                ? cachedProbeStates[probeIndex]
+                : 0u;
+            // Probe positions include the current relocation offset, while
+            // color encodes classification. This makes the overlay a direct
+            // sanity check for whether probe metadata is stable over phases.
             instanceCpuData[probeIndex].positionAndRadius = glm::vec4(
-                volume.probeWorldPosition(probeIndex, nullptr),
+                volume.probeWorldPosition(probeIndex, &localOffset),
                 sphereRadius);
-            instanceCpuData[probeIndex].color = debugColor;
+            instanceCpuData[probeIndex].color = probeStateColor(state);
         }
 
         std::memcpy(instanceBuffer.mapped, instanceCpuData.data(), probeCount * sizeof(ProbeVisualizerInstanceData));

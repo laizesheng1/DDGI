@@ -30,6 +30,61 @@ void copyVolumeDescToDebugState(debug::DebugUIState& state, const ddgi::DDGIVolu
     state.classificationEnabled = desc.classificationEnabled;
 }
 
+struct ProbeStateCounts {
+    uint32_t active{0u};
+    uint32_t inactive{0u};
+    uint32_t backface{0u};
+    uint32_t noGeometry{0u};
+    uint32_t noLocalFrontface{0u};
+    uint32_t onlyBackface{0u};
+};
+
+ProbeStateCounts countProbeStates(const std::vector<uint32_t>& states)
+{
+    ProbeStateCounts counts{};
+    for (const uint32_t state : states) {
+        switch (state) {
+        case ddgi::ProbeStateActive:
+            ++counts.active;
+            break;
+        case ddgi::ProbeStateInactiveBackface:
+            ++counts.inactive;
+            ++counts.backface;
+            break;
+        case ddgi::ProbeStateInactiveNoGeometry:
+            ++counts.inactive;
+            ++counts.noGeometry;
+            break;
+        case ddgi::ProbeStateInactiveNoLocalFrontface:
+            ++counts.inactive;
+            ++counts.noLocalFrontface;
+            break;
+        case ddgi::ProbeStateInactiveOnlyBackface:
+            ++counts.inactive;
+            ++counts.onlyBackface;
+            break;
+        default:
+            if (state == ddgi::ProbeStateActive) {
+                ++counts.active;
+            } else {
+                ++counts.inactive;
+            }
+            break;
+        }
+    }
+    return counts;
+}
+
+void copyProbeStateCountsToDebugState(debug::DebugUIState& state, const ProbeStateCounts& counts)
+{
+    state.activeProbeCount = counts.active;
+    state.inactiveProbeCount = counts.inactive;
+    state.inactiveBackfaceCount = counts.backface;
+    state.inactiveNoGeometryCount = counts.noGeometry;
+    state.inactiveNoLocalFrontfaceCount = counts.noLocalFrontface;
+    state.inactiveOnlyBackfaceCount = counts.onlyBackface;
+}
+
 } // namespace
 
 DDGISample::DDGISample()
@@ -44,6 +99,7 @@ DDGISample::~DDGISample()
     atlasWindow.destroy();
     probeVisualizer.destroy();
     ddgiVolume.destroy();
+    sdfGenerator.destroy();
     sdfVolume.destroy();
     rayTracing.destroy();
     renderer.destroy();
@@ -113,7 +169,7 @@ void DDGISample::recreateDdgiVolumeAndRenderer(const ddgi::DDGIVolumeDesc& volum
     renderer.destroy();
     ddgiVolume.destroy();
 
-    ddgiVolume.create(VKMDevice, pipelineCache, volumeDesc);
+    ddgiVolume.create(VKMDevice, pipelineCache, volumeDesc, &sdfVolume);
     renderer.create(
         VKMDevice,
         pipelineCache,
@@ -148,16 +204,24 @@ void DDGISample::syncDebugStateFromVolume()
 
 void DDGISample::updateRadianceDebugStats()
 {
+    constexpr uint32_t kDebugReadbackInterval = 15u;
+    ++radianceDebugFrameCounter;
+
     if (!debugState.showProbeRadianceStats) {
         debugState.averageProbeRadiance = glm::vec3(0.0f);
         debugState.maxProbeRadiance = glm::vec3(0.0f);
         debugState.radianceDebugProbeCount = 0u;
+        if ((radianceDebugFrameCounter % kDebugReadbackInterval) == 0u) {
+            std::vector<glm::vec3> localOffsets{};
+            std::vector<uint32_t> states{};
+            if (ddgiVolume.readProbePlacementDebugData(localOffsets, states)) {
+                copyProbeStateCountsToDebugState(debugState, countProbeStates(states));
+            }
+        }
         return;
     }
 
-    constexpr uint32_t kRadianceDebugReadbackInterval = 15u;
-    ++radianceDebugFrameCounter;
-    if ((radianceDebugFrameCounter % kRadianceDebugReadbackInterval) != 0u) {
+    if ((radianceDebugFrameCounter % kDebugReadbackInterval) != 0u) {
         return;
     }
 
@@ -171,7 +235,9 @@ void DDGISample::updateRadianceDebugStats()
     glm::vec3 radianceSum(0.0f);
     glm::vec3 maxRadiance(0.0f);
     uint32_t validProbeCount = 0u;
-    for (const glm::vec3& radiance : averageRadiance) {
+    const ProbeStateCounts probeStateCounts = countProbeStates(states);
+    for (uint32_t probeIndex = 0u; probeIndex < averageRadiance.size(); ++probeIndex) {
+        const glm::vec3& radiance = averageRadiance[probeIndex];
         if (radiance.x <= 0.0f && radiance.y <= 0.0f && radiance.z <= 0.0f) {
             continue;
         }
@@ -185,6 +251,7 @@ void DDGISample::updateRadianceDebugStats()
         : glm::vec3(0.0f);
     debugState.maxProbeRadiance = maxRadiance;
     debugState.radianceDebugProbeCount = validProbeCount;
+    copyProbeStateCountsToDebugState(debugState, probeStateCounts);
 }
 
 void DDGISample::prepare()
@@ -200,8 +267,22 @@ void DDGISample::prepare()
                   sponzaScenePath,
                   static_cast<uint32_t>(scene.meshes().size()));
 
+    sdf::SDFVolumeDesc sdfDesc{};
+    if (scene.sceneBounds().valid) {
+        const glm::vec3 paddedExtent = maxVec3(scene.sceneBounds().extent, 1.0f) * 1.10f;
+        sdfDesc.resolution = glm::uvec3(96u, 64u, 96u);
+        sdfDesc.voxelSize = paddedExtent / glm::vec3(sdfDesc.resolution);
+        sdfDesc.origin = scene.sceneBounds().center - paddedExtent * 0.5f;
+        sdfDesc.maxDistance = maxVec3(paddedExtent, 1.0f).x;
+        sdfDesc.maxDistance = (std::max)(sdfDesc.maxDistance, (std::max)(paddedExtent.y, paddedExtent.z));
+        sdfDesc.narrowBandDistance = glm::length(sdfDesc.voxelSize);
+    }
+    sdfVolume.create(VKMDevice, sdfDesc);
+    sdfGenerator.create(VKMDevice, pipelineCache);
+    sdfGenerator.generateFromScene(scene, rayTracing.gpuSceneData(), sdfVolume, queue);
+
     const ddgi::DDGIVolumeDesc initialVolumeDesc = buildVolumeDescFromDebugState();
-    ddgiVolume.create(VKMDevice, pipelineCache, initialVolumeDesc);
+    ddgiVolume.create(VKMDevice, pipelineCache, initialVolumeDesc, &sdfVolume);
     manualVolumeDesc = initialVolumeDesc;
     copyVolumeDescToDebugState(debugState, initialVolumeDesc);
     renderer.create(
@@ -211,9 +292,6 @@ void DDGISample::prepare()
         depthFormat,
         vk::Extent2D{width, height},
         ddgiVolume.resources().descriptorSetLayout());
-
-    sdf::SDFVolumeDesc sdfDesc{};
-    sdfVolume.create(VKMDevice, sdfDesc);
 
     probeVisualizer.create(VKMDevice, renderPass, pipelineCache);
     atlasWindow.create(instance, physicalDevice, VKMDevice, queue, pipelineCache, displayWindows.windowInstance);

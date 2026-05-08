@@ -11,6 +11,7 @@ namespace ddgi {
 namespace {
 
 constexpr uint32_t kInvalidShaderIndex = VK_SHADER_UNUSED_KHR;
+constexpr uint32_t kMaxRtMaterialTextures = 256u;
 
 std::string shaderPath(const char* relativePath)
 {
@@ -100,13 +101,13 @@ vk::RayTracingShaderGroupCreateInfoKHR makeGeneralGroup(uint32_t generalShaderIn
     return group;
 }
 
-vk::RayTracingShaderGroupCreateInfoKHR makeTriangleHitGroup(uint32_t closestHitShaderIndex)
+vk::RayTracingShaderGroupCreateInfoKHR makeTriangleHitGroup(uint32_t closestHitShaderIndex, uint32_t anyHitShaderIndex)
 {
     vk::RayTracingShaderGroupCreateInfoKHR group{};
     group.setType(vk::RayTracingShaderGroupTypeKHR::eTrianglesHitGroup)
         .setGeneralShader(kInvalidShaderIndex)
         .setClosestHitShader(closestHitShaderIndex)
-        .setAnyHitShader(kInvalidShaderIndex)
+        .setAnyHitShader(anyHitShaderIndex)
         .setIntersectionShader(kInvalidShaderIndex);
     return group;
 }
@@ -121,9 +122,10 @@ vk::Pipeline createRayTracingPipeline(vkm::VKMDevice& device,
         return VK_NULL_HANDLE;
     }
 
-    const std::array<std::string, 3> shaderPaths{
+    const std::array<std::string, 4> shaderPaths{
         shaderPath("rt/ddgi_trace.rgen.spv"),
         shaderPath("rt/ddgi_trace.rmiss.spv"),
+        shaderPath("rt/ddgi_trace.rahit.spv"),
         shaderPath("rt/ddgi_trace.rchit.spv"),
     };
 
@@ -137,16 +139,17 @@ vk::Pipeline createRayTracingPipeline(vkm::VKMDevice& device,
         }
     }
 
-    std::array<vk::PipelineShaderStageCreateInfo, 3> shaderStages{
+    std::array<vk::PipelineShaderStageCreateInfo, 4> shaderStages{
         makeStage(shaderModules[0], vk::ShaderStageFlagBits::eRaygenKHR),
         makeStage(shaderModules[1], vk::ShaderStageFlagBits::eMissKHR),
-        makeStage(shaderModules[2], vk::ShaderStageFlagBits::eClosestHitKHR),
+        makeStage(shaderModules[2], vk::ShaderStageFlagBits::eAnyHitKHR),
+        makeStage(shaderModules[3], vk::ShaderStageFlagBits::eClosestHitKHR),
     };
 
     std::array<vk::RayTracingShaderGroupCreateInfoKHR, 3> shaderGroups{
         makeGeneralGroup(0),
         makeGeneralGroup(1),
-        makeTriangleHitGroup(2),
+        makeTriangleHitGroup(3, 2),
     };
 
     vk::RayTracingPipelineCreateInfoKHR pipelineCreateInfo{};
@@ -186,16 +189,16 @@ void DDGIPipeline::create(vkm::VKMDevice* inDevice,
 
     const rt::RayTracingSupport rayTracingSupport = rt::RayTracingContext::querySupport(device->physicalDevice, device->supportedExtensions);
     if (rayTracingSupport.supported) {
-        std::array<vk::DescriptorSetLayoutBinding, 5> sceneBindings{};
+        std::array<vk::DescriptorSetLayoutBinding, 9> sceneBindings{};
         sceneBindings[0].setBinding(0)
             .setDescriptorType(vk::DescriptorType::eAccelerationStructureKHR)
             .setDescriptorCount(1)
             .setStageFlags(vk::ShaderStageFlagBits::eRaygenKHR | vk::ShaderStageFlagBits::eClosestHitKHR);
         for (uint32_t bindingIndex = 1u; bindingIndex < sceneBindings.size(); ++bindingIndex) {
             sceneBindings[bindingIndex].setBinding(bindingIndex)
-                .setDescriptorType(vk::DescriptorType::eStorageBuffer)
-                .setDescriptorCount(1)
-                .setStageFlags(vk::ShaderStageFlagBits::eClosestHitKHR);
+                .setDescriptorType(bindingIndex < 5u ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eCombinedImageSampler)
+                .setDescriptorCount(bindingIndex < 5u ? 1u : kMaxRtMaterialTextures)
+                .setStageFlags(vk::ShaderStageFlagBits::eClosestHitKHR | vk::ShaderStageFlagBits::eAnyHitKHR);
         }
 
         vk::DescriptorSetLayoutCreateInfo sceneLayoutCreateInfo{};

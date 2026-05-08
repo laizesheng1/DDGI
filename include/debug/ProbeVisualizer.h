@@ -29,9 +29,13 @@ private:
     uint32_t sphereIndexCount{0u};
     uint32_t instanceCapacity{0u};
     uint32_t cachedProbeCount{0u};
+    uint32_t debugReadbackFrameCounter{0u};
     std::vector<ProbeVisualizerInstanceData> instanceCpuData{};
+    std::vector<glm::vec3> cachedProbeOffsets{};
+    std::vector<uint32_t> cachedProbeStates{};
     ddgi::DDGIVolumeDesc cachedVolumeDesc{};
     bool instanceDataDirty{true};
+    bool hasPlacementDebugData{false};
 
 public:
     /**
@@ -48,10 +52,9 @@ public:
 
     /**
      * Draw one sphere per probe using a single instanced indexed draw. This
-     * debug path intentionally keeps instance data static unless the probe
-     * lattice changes, because per-frame CPU readback of radiance/offset
-     * buffers quickly dominates the cost once the scene contains hundreds of
-     * probes.
+     * debug path reads only offsets/states at a low frequency. That keeps
+     * active/inactive colors and relocation visible without reading the much
+     * larger per-ray radiance buffer every frame.
      */
     void draw(vk::CommandBuffer commandBuffer,
               const ddgi::DDGIVolume& volume,

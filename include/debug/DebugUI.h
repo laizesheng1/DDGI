@@ -15,7 +15,8 @@ struct DebugUIState {
     bool enableDdgi{true};
     bool showProbeSpheres{true};
     bool showAtlasWindow{true};
-    bool showProbeRadianceStats{true};
+    bool showProbeRadianceStats{false};         //比较消耗绘制性能
+    bool showProbeStatusStats{true};
     bool autoFitProbesToSceneBounds{true};
     bool relocationEnabled{false};              //每个当前 phase 的 probe 会根据 fixed rays 里的 backface hit 来移动自己的 local offset
     bool classificationEnabled{true};           //每个 probe 会用当前 phase 里刚 trace 出来的 fixed ray 数据判断自己是不是应该 inactive，把可能在几何体里的 probe 从 lighting 和后续 trace 中里剔掉
@@ -30,6 +31,12 @@ struct DebugUIState {
     glm::vec3 averageProbeRadiance{0.0f};
     glm::vec3 maxProbeRadiance{0.0f};
     uint32_t probeCount{0u};
+    uint32_t inactiveProbeCount{0u};
+    uint32_t activeProbeCount{0u};
+    uint32_t inactiveBackfaceCount{0u};
+    uint32_t inactiveNoGeometryCount{0u};
+    uint32_t inactiveNoLocalFrontfaceCount{0u};
+    uint32_t inactiveOnlyBackfaceCount{0u};
     uint32_t probeUpdatePhaseCount{4u};
     uint32_t currentProbeUpdatePhase{0u};
     uint32_t radianceDebugProbeCount{0u};

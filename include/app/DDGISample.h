@@ -9,6 +9,7 @@
 #include "rt/RayTracingContext.h"
 #include "scene/Scene.h"
 #include "sdf/SDFVolume.h"
+#include "sdf/SDFGenerator.h"
 
 
 namespace app {
@@ -62,6 +63,7 @@ private:
     renderer::Renderer renderer;
     rt::RayTracingContext rayTracing;
     sdf::SDFVolume sdfVolume;
+    sdf::SDFGenerator sdfGenerator;
     ddgi::DDGIVolume ddgiVolume;
     debug::ProbeVisualizer probeVisualizer;
     debug::DebugAtlasWindow atlasWindow;

@@ -1,0 +1,22 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#include "sdf_common.glsl"
+
+void main()
+{
+    ivec3 coord = ivec3(gl_GlobalInvocationID.xyz);
+    if (!sdfInside(coord)) {
+        return;
+    }
+
+    // Invalid seeds use w < 0 so JFA can distinguish untouched empty voxels
+    // from a valid surface seed at world-space origin.
+    vec4 invalidSeed = vec4(0.0, 0.0, 0.0, -1.0);
+    imageStore(surfaceSeedImage, coord, invalidSeed);
+    imageStore(seedPingImage, coord, invalidSeed);
+    imageStore(seedPongImage, coord, invalidSeed);
+    imageStore(finalDistanceImage, coord, vec4(constants.originAndMaxDistance.w));
+}

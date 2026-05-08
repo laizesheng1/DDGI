@@ -147,4 +147,36 @@ vec3 ddgiApplySurfaceBias(vec3 surfacePositionWorld,
         ddgiSafeNormalize(viewDirectionWorld) * viewBiasWorld;
 }
 
+vec3 ddgiSafeRayDirection(vec3 rayDirection)
+{
+    // Slab tests divide by direction components. Clamp near-zero components
+    // without changing the sign so rays parallel to a probe-cell plane produce
+    // a very large, stable exit distance instead of NaNs.
+    return vec3(
+        abs(rayDirection.x) > DDGI_EPSILON ? rayDirection.x : (rayDirection.x < 0.0 ? -DDGI_EPSILON : DDGI_EPSILON),
+        abs(rayDirection.y) > DDGI_EPSILON ? rayDirection.y : (rayDirection.y < 0.0 ? -DDGI_EPSILON : DDGI_EPSILON),
+        abs(rayDirection.z) > DDGI_EPSILON ? rayDirection.z : (rayDirection.z < 0.0 ? -DDGI_EPSILON : DDGI_EPSILON));
+}
+
+float ddgiRayProbeCellExitDistance(vec3 localProbeOffset,
+                                   vec3 rayDirection,
+                                   vec3 probeSpacing,
+                                   float cellPlaneScale)
+{
+    // RTXGI classifies a probe as active when a fixed ray hits front-facing
+    // geometry before the ray intersects one of the probe voxel planes. The
+    // SDK places those planes one probe spacing away from the *current probe
+    // position* on each axis:
+    //
+    //   p0x = probeWorldPosition + probeSpacing.x * sign(direction.x) * X
+    //
+    // Because ray hit distances are measured from the relocated probe origin,
+    // relocation offset must not shrink this distance. The previous slab test
+    // used half spacing around the regular grid cell, which made the active
+    // test roughly twice as strict and incorrectly penalized relocated probes.
+    vec3 safeAbsDirection = max(abs(rayDirection), vec3(DDGI_EPSILON));
+    vec3 planeDistances = (probeSpacing * max(cellPlaneScale, 0.1)) / safeAbsDirection;
+    return min(planeDistances.x, min(planeDistances.y, planeDistances.z));
+}
+
 #endif

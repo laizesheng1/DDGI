@@ -18,6 +18,16 @@ enum DDGIUpdateFlags : uint32_t {
     ClassificationEnabled = 1u << 1u
 };
 
+enum DDGIProbeState : uint32_t {
+    ProbeStateActive = 0u,
+    ProbeStateInactiveBackface = 1u,
+    ProbeStateInactiveInsideGeometry = 2u,
+    ProbeStateInactiveOutOfBounds = 3u,
+    ProbeStateInactiveNoGeometry = 4u,
+    ProbeStateInactiveNoLocalFrontface = 5u,
+    ProbeStateInactiveOnlyBackface = 6u
+};
+
 struct DDGIVolumeDesc {
     glm::vec3 origin{-8.0f, 1.0f, -8.0f};
     glm::vec3 probeSpacing{2.0f, 2.0f, 2.0f};
@@ -32,6 +42,8 @@ struct DDGIVolumeDesc {
     float hysteresis{0.97f};
     float normalBias{0.20f};
     float viewBias{0.10f};
+    // Retained for SDF debug/future paths. Strict RTXGI mode does not use SDF
+    // distance as a probe classification or relocation input.
     float sdfProbePushDistance{0.35f};
     // First-stage stability controls. They mirror RTXGI concepts but remain
     // intentionally simple until material-aware hit shading and true
@@ -47,6 +59,9 @@ struct DDGIVolumeDesc {
     uint32_t fixedRayCount{16u};
     float probeBackfaceThreshold{0.25f};
     float probeMinFrontfaceDistance{0.20f};
+    // Strict RTXGI classification tests fixed frontface hits against probe
+    // voxel planes one probe spacing away from the current probe position.
+    float probeCellPlaneScale{1.0f};
     bool relocationEnabled{false};
     bool classificationEnabled{true};
     DDGIMovementType movementType{DDGIMovementType::Static};
@@ -66,6 +81,9 @@ struct DDGIFrameConstants {
     glm::vec4 stabilityParams{0.0f};
     glm::uvec4 updateParams{0u};
     glm::vec4 scrollAnchorAndMovement{0.0f};
+    glm::vec4 sdfOriginAndMaxDistance{0.0f};
+    glm::vec4 sdfVoxelSizeAndClearance{0.0f};
+    glm::uvec4 sdfResolutionAndFlags{0u};
 };
 
 enum class DebugTexture {

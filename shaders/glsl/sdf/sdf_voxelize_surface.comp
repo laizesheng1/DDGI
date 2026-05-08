@@ -1,0 +1,165 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "sdf_common.glsl"
+
+struct SceneRtMesh {
+    uvec4 firstIndexFirstVertexMaterialFlags;
+};
+
+layout(set = 0, binding = 5, std430) readonly buffer ScenePositionBuffer {
+    // SceneGpuData stores glm::vec3 tightly packed for BLAS input. Exposing it
+    // as float scalars avoids std430 vec3 array stride padding mismatches.
+    float scenePositions[];
+};
+
+layout(set = 0, binding = 6, std430) readonly buffer SceneIndexBuffer {
+    uint sceneIndices[];
+};
+
+layout(set = 0, binding = 7, std430) readonly buffer SceneMeshBuffer {
+    SceneRtMesh sceneMeshes[];
+};
+
+vec3 loadPosition(uint vertexIndex)
+{
+    uint scalarBase = vertexIndex * 3u;
+    return vec3(
+        scenePositions[scalarBase + 0u],
+        scenePositions[scalarBase + 1u],
+        scenePositions[scalarBase + 2u]);
+}
+
+vec3 closestPointOnTriangle(vec3 p, vec3 a, vec3 b, vec3 c)
+{
+    vec3 ab = b - a;
+    vec3 ac = c - a;
+    vec3 ap = p - a;
+    float d1 = dot(ab, ap);
+    float d2 = dot(ac, ap);
+    if (d1 <= 0.0 && d2 <= 0.0) {
+        return a;
+    }
+
+    vec3 bp = p - b;
+    float d3 = dot(ab, bp);
+    float d4 = dot(ac, bp);
+    if (d3 >= 0.0 && d4 <= d3) {
+        return b;
+    }
+
+    float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
+        float v = d1 / (d1 - d3);
+        return a + v * ab;
+    }
+
+    vec3 cp = p - c;
+    float d5 = dot(ab, cp);
+    float d6 = dot(ac, cp);
+    if (d6 >= 0.0 && d5 <= d6) {
+        return c;
+    }
+
+    float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+        float w = d2 / (d2 - d6);
+        return a + w * ac;
+    }
+
+    float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
+        float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return b + w * (c - b);
+    }
+
+    float denom = 1.0 / (va + vb + vc);
+    float v = vb * denom;
+    float w = vc * denom;
+    return a + ab * v + ac * w;
+}
+
+bool findTriangle(uint globalTriangleIndex,
+                  out uint firstIndex,
+                  out uint firstVertex,
+                  out uint localTriangle)
+{
+    uint remaining = globalTriangleIndex;
+    for (uint meshIndex = 0u; meshIndex < constants.meshCountAndStep.x; ++meshIndex) {
+        SceneRtMesh mesh = sceneMeshes[meshIndex];
+        uint meshFirstIndex = mesh.firstIndexFirstVertexMaterialFlags.x;
+        uint meshFirstVertex = mesh.firstIndexFirstVertexMaterialFlags.y;
+        uint nextFirstIndex = meshFirstIndex;
+        if (meshIndex + 1u < constants.meshCountAndStep.x) {
+            nextFirstIndex = sceneMeshes[meshIndex + 1u].firstIndexFirstVertexMaterialFlags.x;
+        } else {
+            nextFirstIndex = constants.resolutionAndTriangleCount.w * 3u;
+        }
+        uint meshTriangleCount = max((nextFirstIndex - meshFirstIndex) / 3u, 0u);
+        if (remaining < meshTriangleCount) {
+            firstIndex = meshFirstIndex;
+            firstVertex = meshFirstVertex;
+            localTriangle = remaining;
+            return true;
+        }
+        remaining -= meshTriangleCount;
+    }
+    return false;
+}
+
+void main()
+{
+    uint triangleIndex = gl_GlobalInvocationID.x;
+    if (triangleIndex >= constants.resolutionAndTriangleCount.w) {
+        return;
+    }
+
+    uint firstIndex;
+    uint firstVertex;
+    uint localTriangle;
+    if (!findTriangle(triangleIndex, firstIndex, firstVertex, localTriangle)) {
+        return;
+    }
+
+    uint indexBase = firstIndex + localTriangle * 3u;
+    uint ia = firstVertex + sceneIndices[indexBase + 0u];
+    uint ib = firstVertex + sceneIndices[indexBase + 1u];
+    uint ic = firstVertex + sceneIndices[indexBase + 2u];
+    vec3 a = loadPosition(ia);
+    vec3 b = loadPosition(ib);
+    vec3 c = loadPosition(ic);
+
+    vec3 threshold = vec3(constants.voxelSizeAndSurfaceThreshold.w);
+    vec3 triMin = min(a, min(b, c)) - threshold;
+    vec3 triMax = max(a, max(b, c)) + threshold;
+    ivec3 resolution = ivec3(constants.resolutionAndTriangleCount.xyz);
+    ivec3 minCoord = clamp(
+        ivec3(floor((triMin - constants.originAndMaxDistance.xyz) / constants.voxelSizeAndSurfaceThreshold.xyz)) - ivec3(1),
+        ivec3(0),
+        resolution - ivec3(1));
+    ivec3 maxCoord = clamp(
+        ivec3(ceil((triMax - constants.originAndMaxDistance.xyz) / constants.voxelSizeAndSurfaceThreshold.xyz)) + ivec3(1),
+        ivec3(0),
+        resolution - ivec3(1));
+
+    float thresholdDistance = max(constants.voxelSizeAndSurfaceThreshold.w, length(constants.voxelSizeAndSurfaceThreshold.xyz));
+    for (int z = minCoord.z; z <= maxCoord.z; ++z) {
+        for (int y = minCoord.y; y <= maxCoord.y; ++y) {
+            for (int x = minCoord.x; x <= maxCoord.x; ++x) {
+                ivec3 coord = ivec3(x, y, z);
+                vec3 voxelCenter = sdfWorldPositionFromCoord(coord);
+                vec3 closest = closestPointOnTriangle(voxelCenter, a, b, c);
+                float distanceToTriangle = length(voxelCenter - closest);
+                if (distanceToTriangle <= thresholdDistance) {
+                    // Multiple triangles can conservatively cover the same
+                    // seed voxel. We store the closest point generated by this
+                    // invocation; JFA only needs a valid nearby surface seed,
+                    // and the conservative threshold avoids missing thin walls.
+                    imageStore(surfaceSeedImage, coord, vec4(closest, 1.0));
+                }
+            }
+        }
+    }
+}

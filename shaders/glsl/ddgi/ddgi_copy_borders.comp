@@ -15,6 +15,9 @@ struct DDGIFrameConstants {
     vec4 stabilityParams;
     uvec4 updateParams;
     vec4 scrollAnchorAndMovement;
+    vec4 sdfOriginAndMaxDistance;
+    vec4 sdfVoxelSizeAndClearance;
+    uvec4 sdfResolutionAndFlags;
 };
 
 layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {

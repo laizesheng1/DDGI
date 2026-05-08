@@ -20,17 +20,22 @@ private:
     DDGIResources resourceSet{};
     DDGIPipeline pipelineSet{};
     rt::ShaderBindingTable traceShaderBindingTable{};
+    sdf::SDFVolumeDesc sdfDesc{};
     vk::DescriptorPool rtSceneDescriptorPool{VK_NULL_HANDLE};
     vk::DescriptorSet rtSceneDescriptorSet{VK_NULL_HANDLE};
     vk::AccelerationStructureKHR boundTopLevelAccelerationStructure{VK_NULL_HANDLE};
     bool clearRequested{false};
+    bool sdfBound{false};
 
 public:
     /**
      * Create DDGI resource and pipeline state for one probe volume.
      * pipelineCache is reused for compute/RT pipeline creation.
      */
-    void create(vkm::VKMDevice* device, vk::PipelineCache pipelineCache, const DDGIVolumeDesc& desc);
+    void create(vkm::VKMDevice* device,
+                vk::PipelineCache pipelineCache,
+                const DDGIVolumeDesc& desc,
+                const sdf::SDFVolume* sdfVolume = nullptr);
 
     /**
      * Destroy DDGI pipelines before the resources they reference.
@@ -66,8 +71,9 @@ public:
     void updateProbes(vk::CommandBuffer commandBuffer);
 
     /**
-     * Record the SDF-driven probe metadata update. The current SDF pass clamps
-     * offsets until SDFVolume exposes a GPU texture descriptor.
+     * Record the pre-trace probe metadata hygiene pass. In strict RTXGI mode
+     * SDF is debug/future data only; this pass clamps existing offsets and does
+     * not use SDF distance as a classification or relocation input.
      */
     void updateProbesFromSDF(vk::CommandBuffer commandBuffer, const sdf::SDFVolume& sdfVolume);
 
@@ -87,6 +93,14 @@ public:
     bool readProbeDebugData(std::vector<glm::vec3>& averageRadiance,
                             std::vector<glm::vec3>& localOffsets,
                             std::vector<uint32_t>& states) const;
+
+    /**
+     * Read only probe placement/status debug data for visualization.
+     * This avoids touching the large per-ray buffer when the probe overlay only
+     * needs relocated positions and active/inactive state colors.
+     */
+    bool readProbePlacementDebugData(std::vector<glm::vec3>& localOffsets,
+                                     std::vector<uint32_t>& states) const;
 
     /**
      * Update one probe's local relocation offset in the host-visible debug

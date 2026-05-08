@@ -18,6 +18,9 @@ struct DDGIFrameConstants {
     vec4 stabilityParams;
     uvec4 updateParams;
     vec4 scrollAnchorAndMovement;
+    vec4 sdfOriginAndMaxDistance;
+    vec4 sdfVoxelSizeAndClearance;
+    uvec4 sdfResolutionAndFlags;
 };
 
 struct DDGIProbeRayData {
@@ -57,31 +60,89 @@ void main()
         return;
     }
 
-    vec3 accumulatedPush = vec3(0.0);
-    float accumulatedWeight = 0.0;
+    float closestBackfaceDistance = 1.0e27;
+    vec3 closestBackfaceDirection = vec3(0.0);
+    float closestFrontfaceDistance = 1.0e27;
+    vec3 closestFrontfaceDirection = vec3(0.0);
+    float farthestFrontfaceDistance = 0.0;
+    vec3 farthestFrontfaceDirection = vec3(0.0);
+    uint backfaceHitCount = 0u;
+    uint frontfaceHitCount = 0u;
+
     uint rayBaseIndex = probeIndex * raysPerProbe;
+    float maxRayDistance = max(constants.traceParams.x, 1.0);
     for (uint rayIndex = 0u; rayIndex < fixedRayCount; ++rayIndex) {
         DDGIProbeRayData rayData = probeRayData[rayBaseIndex + rayIndex];
         uint flags = uint(rayData.normalAndFlags.w + 0.5);
-        bool backfaceHit = (flags & 2u) != 0u;
-        if (!backfaceHit) {
+        float hitDistance = rayData.radianceAndDistance.w;
+        bool hasHit = (flags & 1u) != 0u && hitDistance > 0.0 && hitDistance < maxRayDistance;
+        if (!hasHit) {
             continue;
         }
 
         vec3 rayDirection = ddgiSafeNormalize(rayData.directionAndDistanceSquared.xyz);
-        float hitDistance = min(rayData.radianceAndDistance.w, constants.stabilityParams.w);
-        // If the probe sees mostly backfaces, it is likely behind a surface.
-        // Moving opposite the offending fixed rays is a cheap first relocation
-        // policy; the offset is still clamped to 45% of cell size below so it
-        // cannot jump across neighboring probe cells.
-        accumulatedPush += -rayDirection * max(hitDistance, 0.01);
-        accumulatedWeight += 1.0;
+        if ((flags & 2u) != 0u) {
+            backfaceHitCount += 1u;
+            if (hitDistance < closestBackfaceDistance) {
+                closestBackfaceDistance = hitDistance;
+                closestBackfaceDirection = rayDirection;
+            }
+            continue;
+        }
+
+        frontfaceHitCount += 1u;
+        if (hitDistance < closestFrontfaceDistance) {
+            closestFrontfaceDistance = hitDistance;
+            closestFrontfaceDirection = rayDirection;
+        }
+        if (hitDistance > farthestFrontfaceDistance) {
+            farthestFrontfaceDistance = hitDistance;
+            farthestFrontfaceDirection = rayDirection;
+        }
     }
 
     vec3 previousOffset = probeOffsets[probeIndex].xyz;
-    vec3 targetOffset = accumulatedWeight > 0.0
-        ? previousOffset + accumulatedPush / accumulatedWeight
-        : previousOffset * 0.90;
-    vec3 maxOffset = constants.probeSpacingAndHysteresis.xyz * 0.45;
-    probeOffsets[probeIndex] = vec4(clamp(targetOffset, -maxOffset, maxOffset), 0.0);
+    vec3 probeSpacing = max(constants.probeSpacingAndHysteresis.xyz, vec3(DDGI_EPSILON));
+    vec3 newOffset = previousOffset;
+    float minFrontfaceDistance = max(constants.stabilityParams.w, 0.0);
+    float backfaceRatio = float(backfaceHitCount) / float(fixedRayCount);
+    bool backfaceHeavy = backfaceRatio > clamp(constants.stabilityParams.z, 0.0, 1.0);
+
+    if (backfaceHeavy && backfaceHitCount > 0u) {
+        // Match RTXGI ProbeRelocationCS: when enough fixed rays hit backfaces,
+        // the probe is treated as inside geometry and moved along the closest
+        // backface ray direction. The previous implementation subtracted this
+        // direction, which pushes deeper into the surface for the common case
+        // where the ray exits geometry through a backface.
+        newOffset = previousOffset + closestBackfaceDirection * (closestBackfaceDistance + minFrontfaceDistance * 0.5);
+    } else if (frontfaceHitCount > 0u && closestFrontfaceDistance < minFrontfaceDistance) {
+        // Match RTXGI's near-frontface case: only move toward the farthest
+        // frontface if that direction will not also move us toward the closest
+        // surface. This avoids crossing nearby geometry while finding a more
+        // useful location in the cell.
+        if (dot(closestFrontfaceDirection, farthestFrontfaceDirection) <= 0.0) {
+            newOffset = previousOffset + farthestFrontfaceDirection * min(farthestFrontfaceDistance, 1.0);
+        }
+    } else if (closestFrontfaceDistance > minFrontfaceDistance && length(previousOffset) > DDGI_EPSILON) {
+        // When the probe has clearance, RTXGI moves it back toward its regular
+        // grid position. The step is bounded by the available margin and the
+        // current offset length so it cannot overshoot past zero.
+        float moveBackMargin = min(closestFrontfaceDistance - minFrontfaceDistance, length(previousOffset));
+        newOffset = previousOffset + moveBackMargin * ddgiSafeNormalize(-previousOffset);
+    }
+
+    vec3 normalizedNewOffset = newOffset / probeSpacing;
+    float normalizedDistanceSquared = dot(normalizedNewOffset, normalizedNewOffset);
+    if (normalizedDistanceSquared <= 0.2025) {
+        // 0.45^2 matches RTXGI's relocation ellipsoid. Rejecting offsets beyond
+        // this keeps relocated probes inside their own cell instead of crossing
+        // into neighboring probe ownership.
+        probeOffsets[probeIndex] = vec4(newOffset, 0.0);
+    } else {
+        vec3 componentClamped = clamp(newOffset, -probeSpacing * 0.45, probeSpacing * 0.45);
+        vec3 normalizedClamped = componentClamped / probeSpacing;
+        probeOffsets[probeIndex] = dot(normalizedClamped, normalizedClamped) <= 0.2025
+            ? vec4(componentClamped, 0.0)
+            : vec4(previousOffset, 0.0);
+    }
 }

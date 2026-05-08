@@ -1,0 +1,98 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+const uint DDGI_RT_MATERIAL_FLAG_MASK = 1u;
+const uint DDGI_RT_MATERIAL_FLAG_BLEND = 2u;
+const uint DDGI_RT_MATERIAL_FLAG_BASE_COLOR_TEXTURE = 4u;
+const uint DDGI_MAX_RT_MATERIAL_TEXTURES = 256u;
+
+hitAttributeEXT vec2 triangleBarycentrics;
+
+struct SceneRtVertexAttribute {
+    vec4 normalAndMaterial;
+    vec4 uvAndFlags;
+    vec4 tangentAndSign;
+};
+
+struct SceneRtMesh {
+    uvec4 firstIndexFirstVertexMaterialFlags;
+};
+
+struct SceneRtMaterial {
+    vec4 baseColorAndAlphaCutoff;
+    vec4 emissiveAndFlags;
+    vec4 metallicRoughnessAndFlags;
+    vec4 baseColorTextureTransform;
+    vec4 normalTextureTransform;
+    vec4 metallicRoughnessTextureTransform;
+    vec4 emissiveTextureTransform;
+};
+
+layout(set = 1, binding = 1, std430) readonly buffer SceneVertexAttributesBuffer {
+    SceneRtVertexAttribute vertexAttributes[];
+};
+
+layout(set = 1, binding = 2, std430) readonly buffer SceneIndexBuffer {
+    uint sceneIndices[];
+};
+
+layout(set = 1, binding = 3, std430) readonly buffer SceneMeshBuffer {
+    SceneRtMesh sceneMeshes[];
+};
+
+layout(set = 1, binding = 4, std430) readonly buffer SceneMaterialBuffer {
+    SceneRtMaterial sceneMaterials[];
+};
+
+layout(set = 1, binding = 5) uniform sampler2D baseColorTextures[DDGI_MAX_RT_MATERIAL_TEXTURES];
+
+vec2 applyUvTransform(vec2 uv, vec4 transform)
+{
+    return uv * transform.xy + transform.zw;
+}
+
+void main()
+{
+    uint meshIndex = uint(gl_InstanceCustomIndexEXT);
+    SceneRtMesh mesh = sceneMeshes[meshIndex];
+    uint materialIndex = min(mesh.firstIndexFirstVertexMaterialFlags.z, DDGI_MAX_RT_MATERIAL_TEXTURES - 1u);
+    SceneRtMaterial material = sceneMaterials[materialIndex];
+    uint materialFlags = uint(material.emissiveAndFlags.w + 0.5);
+    bool alphaTested = (materialFlags & (DDGI_RT_MATERIAL_FLAG_MASK | DDGI_RT_MATERIAL_FLAG_BLEND)) != 0u;
+    if (!alphaTested) {
+        return;
+    }
+
+    uint firstIndex = mesh.firstIndexFirstVertexMaterialFlags.x;
+    uint firstVertex = mesh.firstIndexFirstVertexMaterialFlags.y;
+    uint primitiveIndexBase = firstIndex + uint(gl_PrimitiveID) * 3u;
+    uvec3 vertexIndices = uvec3(
+        sceneIndices[primitiveIndexBase + 0u],
+        sceneIndices[primitiveIndexBase + 1u],
+        sceneIndices[primitiveIndexBase + 2u]) + uvec3(firstVertex);
+    vec3 barycentricWeights = vec3(
+        1.0 - triangleBarycentrics.x - triangleBarycentrics.y,
+        triangleBarycentrics.x,
+        triangleBarycentrics.y);
+    vec2 uv =
+        vertexAttributes[vertexIndices.x].uvAndFlags.xy * barycentricWeights.x +
+        vertexAttributes[vertexIndices.y].uvAndFlags.xy * barycentricWeights.y +
+        vertexAttributes[vertexIndices.z].uvAndFlags.xy * barycentricWeights.z;
+
+    float alpha = material.metallicRoughnessAndFlags.z > 0.0 ? material.metallicRoughnessAndFlags.z : 1.0;
+    if ((materialFlags & DDGI_RT_MATERIAL_FLAG_BASE_COLOR_TEXTURE) != 0u) {
+        alpha *= texture(baseColorTextures[materialIndex], applyUvTransform(uv, material.baseColorTextureTransform)).a;
+    }
+
+    // Cutout geometry must not occlude probe rays where the authored alpha is
+    // transparent. Doing this in any-hit, before closest-hit writes radiance,
+    // keeps leaf/card/cloth materials from poisoning distance moments and
+    // classification with solid debug-color triangles.
+    float cutoff = material.baseColorAndAlphaCutoff.a;
+    if ((materialFlags & DDGI_RT_MATERIAL_FLAG_BLEND) != 0u) {
+        cutoff = max(cutoff, 0.50);
+    }
+    if (alpha < cutoff) {
+        ignoreIntersectionEXT;
+    }
+}

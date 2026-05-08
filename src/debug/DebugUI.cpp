@@ -42,6 +42,7 @@ void DebugUI::draw(vkm::HUD* ui, DebugUIState& state)
         ui->checkBox("Show probe spheres", &state.showProbeSpheres);
         ui->checkBox("Show atlas window", &state.showAtlasWindow);
         ui->checkBox("Show radiance stats", &state.showProbeRadianceStats);
+        ui->checkBox("Show probe status", &state.showProbeStatusStats);
         ui->checkBox("Auto fit scene bounds", &state.autoFitProbesToSceneBounds);
         ui->checkBox("Relocation", &state.relocationEnabled);
         ui->checkBox("Classification", &state.classificationEnabled);
@@ -69,6 +70,13 @@ void DebugUI::draw(vkm::HUD* ui, DebugUIState& state)
         if (ui->comboBox("Probe distribution", &distributionMode, {"UniformInSceneBounds", "ManualVolume"})) {
             state.distributionMode = static_cast<ProbeDistributionMode>(distributionMode);
         }
+        // These controls affect the next generated probe layout, so keep them
+        // near the rest of the editable settings instead of mixing them with
+        // read-only status values.
+        ui->inputFloat("Volume offset X", &state.volumeOffset.x, 0.10f, 3);
+        ui->inputFloat("Volume offset Y", &state.volumeOffset.y, 0.10f, 3);
+        ui->inputFloat("Volume offset Z", &state.volumeOffset.z, 0.10f, 3);
+
         if (ui->button("Apply DDGI settings")) {
             state.requestApplyProbeLayout = true;
         }
@@ -82,14 +90,28 @@ void DebugUI::draw(vkm::HUD* ui, DebugUIState& state)
         const std::string probeCountLabel = std::format("Probe count: {}", state.probeCount);
         ui->button(probeCountLabel.c_str());
 
+        if (state.showProbeStatusStats) {
+            const std::string inactiveProbeLabel = std::format("Inactive probes: {}", state.inactiveProbeCount);
+            ui->button(inactiveProbeLabel.c_str());
+
+            const std::string activeProbeLabel = std::format("Active probes: {}", state.activeProbeCount);
+            ui->button(activeProbeLabel.c_str());
+
+            const std::string backfaceProbeLabel = std::format("Backface-heavy: {}", state.inactiveBackfaceCount);
+            ui->button(backfaceProbeLabel.c_str());
+
+            const std::string noGeometryProbeLabel = std::format("No geometry hit: {}", state.inactiveNoGeometryCount);
+            ui->button(noGeometryProbeLabel.c_str());
+
+            const std::string noLocalFrontfaceProbeLabel = std::format("No local frontface: {}", state.inactiveNoLocalFrontfaceCount);
+            ui->button(noLocalFrontfaceProbeLabel.c_str());
+
+            const std::string onlyBackfaceProbeLabel = std::format("Only backface: {}", state.inactiveOnlyBackfaceCount);
+            ui->button(onlyBackfaceProbeLabel.c_str());
+        }
+
         const std::string raysLabel = std::format("Rays / probe: {}", state.raysPerProbe);
         ui->button(raysLabel.c_str());
-
-        const std::string phaseLabel = std::format(
-            "Update phase: {}/{}",
-            state.currentProbeUpdatePhase,
-            state.probeUpdatePhaseCount);
-        ui->button(phaseLabel.c_str());
 
         const std::string originLabel = std::format(
             "Volume origin: {:.2f}, {:.2f}, {:.2f}",
@@ -119,13 +141,6 @@ void DebugUI::draw(vkm::HUD* ui, DebugUIState& state)
             ui->button(sampleCountLabel.c_str());
         }
 
-        // The user's current workflow is about moving the whole probe volume,
-        // not editing individual probes. These three fields therefore apply a
-        // translation to the generated DDGI volume origin before the layout is
-        // rebuilt.
-        ui->inputFloat("Volume offset X", &state.volumeOffset.x, 0.10f, 3);
-        ui->inputFloat("Volume offset Y", &state.volumeOffset.y, 0.10f, 3);
-        ui->inputFloat("Volume offset Z", &state.volumeOffset.z, 0.10f, 3);
     }
 }
 

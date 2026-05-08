@@ -17,6 +17,9 @@ struct DDGIFrameConstants {
     vec4 stabilityParams;
     uvec4 updateParams;
     vec4 scrollAnchorAndMovement;
+    vec4 sdfOriginAndMaxDistance;
+    vec4 sdfVoxelSizeAndClearance;
+    uvec4 sdfResolutionAndFlags;
 };
 
 struct DDGIProbeRayData {
@@ -77,7 +80,7 @@ void main()
         // radiance blending, and inactive probes are ignored by lighting.
         probeRayData[globalRayIndex].radianceAndDistance = vec4(0.0, 0.0, 0.0, 1.0e27);
         probeRayData[globalRayIndex].directionAndDistanceSquared = vec4(0.0, 1.0, 0.0, 1.0e27);
-        probeRayData[globalRayIndex].normalAndFlags = vec4(0.0, 0.0, 0.0, 0.0);
+        probeRayData[globalRayIndex].normalAndFlags = vec4(0.0, 0.0, 0.0, 4.0);
         return;
     }
 
@@ -88,11 +91,18 @@ void main()
         constants.probeSpacingAndHysteresis.xyz);
     probeOriginWorld += probeOffsets[probeIndex].xyz;
 
-    // The first fixedRayCount rays keep stable directions across frames. These
-    // fixed rays are reserved for relocation/classification so those decisions
-    // do not inherit temporal noise from the randomly rotated blending rays.
-    float frameRotation = rayIndex < fixedRayCount ? 0.0 : float(constants.probeCounts.w & 1023u) * DDGI_GOLDEN_ANGLE;
-    vec3 rayDirectionWorld = ddgiFibonacciDirection(rayIndex, raysPerProbe, frameRotation);
+    // The first fixedRayCount rays keep stable directions across frames. They
+    // must be distributed over their own fixed-ray set, not sampled as the
+    // first N entries of the full raysPerProbe sequence. Otherwise fixed rays
+    // cluster on one spherical cap and classification can miss nearby columns
+    // or walls even when the probe is close to geometry.
+    bool fixedRay = rayIndex < fixedRayCount;
+    uint blendRayCount = max(raysPerProbe - fixedRayCount, 1u);
+    uint localBlendRayIndex = rayIndex - fixedRayCount;
+    float frameRotation = float(constants.probeCounts.w & 1023u) * DDGI_GOLDEN_ANGLE;
+    vec3 rayDirectionWorld = fixedRay
+        ? ddgiFibonacciDirection(rayIndex, max(fixedRayCount, 1u), 0.0)
+        : ddgiFibonacciDirection(localBlendRayIndex, blendRayCount, frameRotation);
 
     payload.radiance = vec3(0.0);
     float maxRayDistance = max(constants.traceParams.x, 1.0);
@@ -102,12 +112,12 @@ void main()
     payload.normal = vec3(0.0);
     payload.flags = 0.0;
 
-    // Ray flags keep the first implementation simple: opaque triangle hits only.
-    // Any-hit/material alpha support can be added after scene material buffers
-    // are available to the hit shader.
+    // Do not force opaque tracing here. The hit group has an any-hit shader
+    // that samples the authored base-color alpha for MASK/BLEND materials and
+    // ignores cutout texels before the closest-hit shader evaluates radiance.
     traceRayEXT(
         sceneTlas,
-        gl_RayFlagsOpaqueEXT,
+        gl_RayFlagsNoneEXT,
         0xff,
         0,
         0,

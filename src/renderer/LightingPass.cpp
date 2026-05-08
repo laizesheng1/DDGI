@@ -168,9 +168,14 @@ void LightingPass::create(vkm::VKMDevice* inDevice,
     vk::PipelineMultisampleStateCreateInfo multisampleState{};
     multisampleState.setRasterizationSamples(vk::SampleCountFlagBits::e1);
 
+    // The deferred lighting pass is already a fullscreen pass that samples
+    // GBuffer depth. Writing that depth into the swapchain render pass depth
+    // attachment is cheaper than drawing a second scene depth prepass and lets
+    // debug overlays such as probe spheres use normal hardware depth testing.
     vk::PipelineDepthStencilStateCreateInfo depthStencilState{};
-    depthStencilState.setDepthTestEnable(VK_FALSE)
-        .setDepthWriteEnable(VK_FALSE)
+    depthStencilState.setDepthTestEnable(VK_TRUE)
+        .setDepthWriteEnable(VK_TRUE)
+        .setDepthCompareOp(vk::CompareOp::eAlways)
         .setStencilTestEnable(VK_FALSE);
 
     vk::PipelineColorBlendAttachmentState colorBlendAttachment{};

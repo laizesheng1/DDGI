@@ -7,6 +7,8 @@
 namespace ddgi {
 namespace {
 
+constexpr uint32_t kMaxRtMaterialTextures = 256u;
+
 uint32_t dispatchGroups(uint32_t texelCount, uint32_t localSize)
 {
     return (texelCount + localSize - 1u) / localSize;
@@ -96,8 +98,9 @@ void recordComputeToRayTracingBarrier(vk::CommandBuffer commandBuffer, const vkm
         .setOffset(0)
         .setSize(VK_WHOLE_SIZE);
 
-    // Probe relocation/SDF updates write offsets and states in compute. The RT
-    // raygen shader immediately consumes those buffers to place probe origins.
+    // Probe relocation and the pre-trace clamp pass write offsets/states in
+    // compute. The RT raygen shader immediately consumes those buffers to place
+    // probe origins and skip non-fixed rays for inactive probes.
     commandBuffer.pipelineBarrier(
         vk::PipelineStageFlagBits::eComputeShader,
         vk::PipelineStageFlagBits::eRayTracingShaderKHR,
@@ -130,9 +133,10 @@ void createRtSceneDescriptors(vkm::VKMDevice& device,
         return;
     }
 
-    std::array<vk::DescriptorPoolSize, 2> poolSizes{
+    std::array<vk::DescriptorPoolSize, 3> poolSizes{
         vk::DescriptorPoolSize{vk::DescriptorType::eAccelerationStructureKHR, 1u},
         vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 4u},
+        vk::DescriptorPoolSize{vk::DescriptorType::eCombinedImageSampler, kMaxRtMaterialTextures * 4u},
     };
 
     vk::DescriptorPoolCreateInfo poolCreateInfo{};
@@ -165,25 +169,61 @@ void updateRtSceneDescriptor(vk::Device logicalDevice,
         scene.gpuData->materialDescriptor(),
     };
 
-    std::array<vk::WriteDescriptorSet, 5> descriptorWrites{};
+    auto makePaddedImageArray = [](const std::vector<vk::DescriptorImageInfo>& source) {
+        std::array<vk::DescriptorImageInfo, kMaxRtMaterialTextures> padded{};
+        const vk::DescriptorImageInfo fallback = source.empty() ? vk::DescriptorImageInfo{} : source.front();
+        padded.fill(fallback);
+        const size_t copyCount = std::min(source.size(), padded.size());
+        for (size_t descriptorIndex = 0; descriptorIndex < copyCount; ++descriptorIndex) {
+            padded[descriptorIndex] = source[descriptorIndex];
+        }
+        return padded;
+    };
+    const auto baseColorTextures = makePaddedImageArray(scene.gpuData->baseColorTextureDescriptorArray());
+    const auto normalTextures = makePaddedImageArray(scene.gpuData->normalTextureDescriptorArray());
+    const auto metallicRoughnessTextures = makePaddedImageArray(scene.gpuData->metallicRoughnessTextureDescriptorArray());
+    const auto emissiveTextures = makePaddedImageArray(scene.gpuData->emissiveTextureDescriptorArray());
+    if (baseColorTextures[0].imageView == VK_NULL_HANDLE ||
+        normalTextures[0].imageView == VK_NULL_HANDLE ||
+        metallicRoughnessTextures[0].imageView == VK_NULL_HANDLE ||
+        emissiveTextures[0].imageView == VK_NULL_HANDLE) {
+        OutputMessage("[DDGI] RT scene texture descriptors are not ready; skipping scene descriptor update\n");
+        return;
+    }
+
+    std::array<vk::WriteDescriptorSet, 9> descriptorWrites{};
     descriptorWrites[0].setDstSet(descriptorSet)
         .setDstBinding(0)
         .setDescriptorCount(1)
         .setDescriptorType(vk::DescriptorType::eAccelerationStructureKHR)
         .setPNext(&accelerationStructureWrite);
 
-    for (uint32_t writeIndex = 1u; writeIndex < descriptorWrites.size(); ++writeIndex) {
+    for (uint32_t writeIndex = 1u; writeIndex <= static_cast<uint32_t>(bufferInfos.size()); ++writeIndex) {
         descriptorWrites[writeIndex].setDstSet(descriptorSet)
             .setDstBinding(writeIndex)
             .setDescriptorCount(1)
             .setDescriptorType(vk::DescriptorType::eStorageBuffer)
             .setPBufferInfo(&bufferInfos[writeIndex - 1u]);
     }
+    const std::array<const vk::DescriptorImageInfo*, 4> textureArrays{
+        baseColorTextures.data(),
+        normalTextures.data(),
+        metallicRoughnessTextures.data(),
+        emissiveTextures.data(),
+    };
+    for (uint32_t textureWriteIndex = 0u; textureWriteIndex < textureArrays.size(); ++textureWriteIndex) {
+        descriptorWrites[5u + textureWriteIndex].setDstSet(descriptorSet)
+            .setDstBinding(5u + textureWriteIndex)
+            .setDescriptorCount(kMaxRtMaterialTextures)
+            .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+            .setPImageInfo(textureArrays[textureWriteIndex]);
+    }
 
     // The RT scene descriptor set is updated only when the TLAS changes. These
-    // storage buffers are immutable for the loaded scene, so the closest-hit
-    // shader can reconstruct material factors without touching vulkan_base's
-    // glTF descriptors or requiring bindless textures.
+    // storage buffers and per-material texture arrays are immutable for the
+    // loaded scene. Binding arrays by material index keeps any-hit alpha tests
+    // and closest-hit shading consistent with the compact material buffer while
+    // leaving vulkan_base's forward renderer descriptors untouched.
     logicalDevice.updateDescriptorSets(descriptorWrites, {});
 }
 
@@ -191,11 +231,19 @@ void updateRtSceneDescriptor(vk::Device logicalDevice,
 
 void DDGIVolume::create(vkm::VKMDevice* inDevice,
                         vk::PipelineCache pipelineCache,
-                        const DDGIVolumeDesc& inDesc)
+                        const DDGIVolumeDesc& inDesc,
+                        const sdf::SDFVolume* sdfVolume)
 {
     destroy();
     device = inDevice;
     desc = inDesc;
+    if (sdfVolume != nullptr && sdfVolume->isCreated()) {
+        sdfDesc = sdfVolume->description();
+        sdfBound = true;
+    } else {
+        sdfDesc = {};
+        sdfBound = false;
+    }
     resourceSet.create(device, desc);
     if (!resourceSet.isCreated()) {
         return;
@@ -228,6 +276,7 @@ void DDGIVolume::destroy()
     resourceSet.destroy();
     boundTopLevelAccelerationStructure = VK_NULL_HANDLE;
     clearRequested = false;
+    sdfBound = false;
     device = nullptr;
 }
 
@@ -253,7 +302,7 @@ void DDGIVolume::updateConstants(const Camera& camera, uint32_t frameIndex)
         desc.maxRayDistance,
         desc.irradianceGamma,
         desc.distanceExponent,
-        0.0f);
+        desc.probeCellPlaneScale);
     constants.stabilityParams = glm::vec4(
         desc.probeChangeThreshold,
         desc.probeBrightnessThreshold,
@@ -267,6 +316,11 @@ void DDGIVolume::updateConstants(const Camera& camera, uint32_t frameIndex)
     constants.scrollAnchorAndMovement = glm::vec4(
         desc.scrollAnchor,
         desc.movementType == DDGIMovementType::Scrolling ? 1.0f : 0.0f);
+    constants.sdfOriginAndMaxDistance = glm::vec4(sdfDesc.origin, sdfDesc.maxDistance);
+    constants.sdfVoxelSizeAndClearance = glm::vec4(
+        sdfDesc.voxelSize,
+        std::max(desc.probeMinFrontfaceDistance, desc.sdfProbePushDistance));
+    constants.sdfResolutionAndFlags = glm::uvec4(sdfDesc.resolution, sdfBound ? 1u : 0u);
     resourceSet.updateConstants(constants);
 }
 
@@ -386,8 +440,9 @@ void DDGIVolume::updateProbes(vk::CommandBuffer commandBuffer)
     }
 }
 
-void DDGIVolume::updateProbesFromSDF(vk::CommandBuffer commandBuffer, const sdf::SDFVolume&)
+void DDGIVolume::updateProbesFromSDF(vk::CommandBuffer commandBuffer, const sdf::SDFVolume& sdfVolume)
 {
+    (void)sdfVolume;
     if (!resourceSet.isCreated()) {
         return;
     }
@@ -504,6 +559,51 @@ bool DDGIVolume::readProbeDebugData(std::vector<glm::vec3>& averageRadiance,
     device->logicalDevice.unmapMemory(probeStatesBuffer.memory);
     device->logicalDevice.unmapMemory(probeOffsetsBuffer.memory);
     device->logicalDevice.unmapMemory(probeRayDataBuffer.memory);
+    return true;
+}
+
+bool DDGIVolume::readProbePlacementDebugData(std::vector<glm::vec3>& localOffsets,
+                                             std::vector<uint32_t>& states) const
+{
+    if (!resourceSet.isCreated() || device == nullptr) {
+        return false;
+    }
+
+    const uint32_t probeCount = resourceSet.totalProbeCount();
+    localOffsets.assign(probeCount, glm::vec3(0.0f));
+    states.assign(probeCount, 0u);
+
+    const vkm::Buffer& probeOffsetsBuffer = resourceSet.probeOffsets();
+    const vkm::Buffer& probeStatesBuffer = resourceSet.probeStates();
+    if (probeOffsetsBuffer.memory == VK_NULL_HANDLE ||
+        probeStatesBuffer.memory == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    void* probeOffsetsMapped = nullptr;
+    void* probeStatesMapped = nullptr;
+    VK_CHECK_RESULT(device->logicalDevice.mapMemory(
+        probeOffsetsBuffer.memory,
+        0,
+        probeOffsetsBuffer.size,
+        {},
+        &probeOffsetsMapped));
+    VK_CHECK_RESULT(device->logicalDevice.mapMemory(
+        probeStatesBuffer.memory,
+        0,
+        probeStatesBuffer.size,
+        {},
+        &probeStatesMapped));
+
+    const auto* offsets = reinterpret_cast<const glm::vec4*>(probeOffsetsMapped);
+    const auto* stateData = reinterpret_cast<const uint32_t*>(probeStatesMapped);
+    for (uint32_t probeIndex = 0; probeIndex < probeCount; ++probeIndex) {
+        localOffsets[probeIndex] = glm::vec3(offsets[probeIndex]);
+        states[probeIndex] = stateData[probeIndex];
+    }
+
+    device->logicalDevice.unmapMemory(probeStatesBuffer.memory);
+    device->logicalDevice.unmapMemory(probeOffsetsBuffer.memory);
     return true;
 }
 

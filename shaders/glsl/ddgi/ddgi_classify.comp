@@ -6,7 +6,10 @@
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 const uint DDGI_PROBE_STATE_ACTIVE = 0u;
-const uint DDGI_PROBE_STATE_INACTIVE = 1u;
+const uint DDGI_PROBE_STATE_INACTIVE_BACKFACE = 1u;
+const uint DDGI_PROBE_STATE_INACTIVE_NO_GEOMETRY = 4u;
+const uint DDGI_PROBE_STATE_INACTIVE_NO_LOCAL_FRONTFACE = 5u;
+const uint DDGI_PROBE_STATE_INACTIVE_ONLY_BACKFACE = 6u;
 
 struct DDGIFrameConstants {
     mat4 view;
@@ -21,6 +24,9 @@ struct DDGIFrameConstants {
     vec4 stabilityParams;
     uvec4 updateParams;
     vec4 scrollAnchorAndMovement;
+    vec4 sdfOriginAndMaxDistance;
+    vec4 sdfVoxelSizeAndClearance;
+    uvec4 sdfResolutionAndFlags;
 };
 
 struct DDGIProbeRayData {
@@ -35,6 +41,10 @@ layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
 
 layout(set = 0, binding = 1, std430) readonly buffer ProbeRayDataBuffer {
     DDGIProbeRayData probeRayData[];
+};
+
+layout(set = 0, binding = 2, std430) readonly buffer ProbeOffsetsBuffer {
+    vec4 probeOffsets[];
 };
 
 layout(set = 0, binding = 3, std430) buffer ProbeStatesBuffer {
@@ -55,39 +65,66 @@ void main()
     }
 
     uint raysPerProbe = max(uint(constants.volumeOriginAndRays.w), 1u);
-    float nearGeometryDistance = max(constants.biasAndDebug.z, 0.0);
-    uint nearHitCount = 0u;
-    uint backfaceHitCount = 0u;
-    uint finiteHitCount = 0u;
-    uint rayBaseIndex = probeIndex * raysPerProbe;
-    uint classificationRayCount = min(constants.updateParams.x, raysPerProbe);
-    if (classificationRayCount == 0u) {
-        classificationRayCount = raysPerProbe;
+    uint fixedRayCount = min(constants.updateParams.x, raysPerProbe);
+    if (fixedRayCount == 0u) {
+        return;
     }
 
-    for (uint rayIndex = 0u; rayIndex < classificationRayCount; ++rayIndex) {
+    uint rayBaseIndex = probeIndex * raysPerProbe;
+    uint backfaceHitCount = 0u;
+    uint frontfaceHitCount = 0u;
+    uint frontfaceInsideCellCount = 0u;
+    vec3 probeSpacing = max(constants.probeSpacingAndHysteresis.xyz, vec3(DDGI_EPSILON));
+    vec3 localProbeOffset = probeOffsets[probeIndex].xyz;
+    float cellPlaneScale = max(constants.traceParams.w, 0.1);
+    float maxRayDistance = max(constants.traceParams.x, 1.0);
+
+    for (uint rayIndex = 0u; rayIndex < fixedRayCount; ++rayIndex) {
         DDGIProbeRayData rayData = probeRayData[rayBaseIndex + rayIndex];
-        float hitDistance = rayData.radianceAndDistance.w;
         uint flags = uint(rayData.normalAndFlags.w + 0.5);
-        if (hitDistance < 1.0e20) {
-            finiteHitCount += 1u;
+        float hitDistance = rayData.radianceAndDistance.w;
+        bool hasHit = (flags & 1u) != 0u && hitDistance > 0.0 && hitDistance < maxRayDistance;
+        if (!hasHit) {
+            continue;
         }
-        if (hitDistance < nearGeometryDistance) {
-            nearHitCount += 1u;
-        }
+
         if ((flags & 2u) != 0u) {
             backfaceHitCount += 1u;
+            continue;
+        }
+
+        frontfaceHitCount += 1u;
+        vec3 rayDirection = ddgiSafeNormalize(rayData.directionAndDistanceSquared.xyz);
+        float cellExitDistance = ddgiRayProbeCellExitDistance(
+            localProbeOffset,
+            rayDirection,
+            probeSpacing,
+            cellPlaneScale);
+        if (hitDistance <= cellExitDistance) {
+            frontfaceInsideCellCount += 1u;
         }
     }
 
-    float nearHitRatio = float(nearHitCount) / float(classificationRayCount);
-    float backfaceRatio = float(backfaceHitCount) / float(classificationRayCount);
-    // Backface-heavy fixed rays are a strong hint that a probe is inside
-    // closed geometry. Near-hit ratio remains as a conservative fallback for
-    // assets with unreliable normals while the material path is still young.
-    bool mostlyInsideGeometry = backfaceRatio > constants.stabilityParams.z || nearHitRatio > 0.35;
-    bool neverSeesScene = finiteHitCount == 0u;
-    probeStates[probeIndex] = mostlyInsideGeometry && !neverSeesScene
-        ? DDGI_PROBE_STATE_INACTIVE
-        : DDGI_PROBE_STATE_ACTIVE;
+    // RTXGI phase 1: probes that see too many backfaces in the fixed ray set
+    // are considered inside or too close to invalid geometry and become
+    // inactive immediately.
+    float backfaceRatio = float(backfaceHitCount) / float(fixedRayCount);
+    if (backfaceRatio > clamp(constants.stabilityParams.z, 0.0, 1.0)) {
+        probeStates[probeIndex] = DDGI_PROBE_STATE_INACTIVE_BACKFACE;
+        return;
+    }
+
+    // RTXGI phase 2: a probe is active only when at least one fixed frontface
+    // hit lies inside this probe's voxel/cell. Frontface hits beyond the cell
+    // boundary are deliberately ignored; sparse volumes are expected to raise
+    // probe density instead of relaxing this predicate.
+    if (frontfaceInsideCellCount > 0u) {
+        probeStates[probeIndex] = DDGI_PROBE_STATE_ACTIVE;
+    } else if (frontfaceHitCount > 0u) {
+        probeStates[probeIndex] = DDGI_PROBE_STATE_INACTIVE_NO_LOCAL_FRONTFACE;
+    } else if (backfaceHitCount > 0u) {
+        probeStates[probeIndex] = DDGI_PROBE_STATE_INACTIVE_ONLY_BACKFACE;
+    } else {
+        probeStates[probeIndex] = DDGI_PROBE_STATE_INACTIVE_NO_GEOMETRY;
+    }
 }

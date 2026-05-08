@@ -1,0 +1,28 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#include "sdf_common.glsl"
+
+void main()
+{
+    ivec3 coord = ivec3(gl_GlobalInvocationID.xyz);
+    if (!sdfInside(coord)) {
+        return;
+    }
+
+    uint sourceSelector = constants.meshCountAndStep.z;
+    vec4 seed = sdfLoadSeed(sourceSelector, coord);
+    float distanceToSurface = constants.originAndMaxDistance.w;
+    if (seed.w >= 0.0) {
+        distanceToSurface = min(
+            length(sdfWorldPositionFromCoord(coord) - seed.xyz),
+            constants.originAndMaxDistance.w);
+    }
+
+    // The final field is unsigned by design. DDGI still asks fixed rays for
+    // inside/backface evidence because a global open-scene sign is unreliable
+    // around portals, thin curtains, and missing exterior caps.
+    imageStore(finalDistanceImage, coord, vec4(distanceToSurface));
+}

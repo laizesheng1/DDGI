@@ -26,6 +26,46 @@ vk::Extent2D calculateAtlasExtent(uint32_t probeCount, uint32_t tileSize, uint32
     return vk::Extent2D{tileColumns * tileSize, tileRows * tileSize};
 }
 
+bool validateVolumeDesc(vk::PhysicalDevice physicalDevice, const DDGIVolumeDesc& desc, uint32_t probeCount)
+{
+    const vk::PhysicalDeviceProperties properties = physicalDevice.getProperties();
+    if (probeCount == 0u || desc.raysPerProbe == 0u) {
+        OutputMessage("[DDGI] Invalid volume: probeCount={} raysPerProbe={}\n", probeCount, desc.raysPerProbe);
+        return false;
+    }
+    if (desc.irradianceOctSize < 2u || desc.depthOctSize < 2u) {
+        OutputMessage("[DDGI] Invalid atlas oct size: irradiance={} depth={}\n", desc.irradianceOctSize, desc.depthOctSize);
+        return false;
+    }
+    if (desc.probeCounts.x == 0u || desc.probeCounts.y == 0u || desc.probeCounts.z == 0u) {
+        OutputMessage("[DDGI] Invalid probe counts: {} {} {}\n", desc.probeCounts.x, desc.probeCounts.y, desc.probeCounts.z);
+        return false;
+    }
+
+    const uint32_t tileColumns = std::max(1u, static_cast<uint32_t>(std::ceil(std::sqrt(static_cast<float>(probeCount)))));
+    const vk::Extent2D irradianceExtent = calculateAtlasExtent(probeCount, desc.irradianceOctSize + 2u, tileColumns);
+    const vk::Extent2D depthExtent = calculateAtlasExtent(probeCount, desc.depthOctSize + 2u, tileColumns);
+    const uint32_t max2D = properties.limits.maxImageDimension2D;
+    if (irradianceExtent.width > max2D || irradianceExtent.height > max2D ||
+        depthExtent.width > max2D || depthExtent.height > max2D) {
+        OutputMessage(
+            "[DDGI] Atlas extent exceeds device limit {}: irradiance={}x{} moments={}x{}\n",
+            max2D,
+            irradianceExtent.width,
+            irradianceExtent.height,
+            depthExtent.width,
+            depthExtent.height);
+        return false;
+    }
+
+    const uint64_t rayRecords = static_cast<uint64_t>(probeCount) * static_cast<uint64_t>(desc.raysPerProbe);
+    if (rayRecords > (1ull << 30ull)) {
+        OutputMessage("[DDGI] Probe ray buffer would be too large: {} records\n", rayRecords);
+        return false;
+    }
+    return true;
+}
+
 void prepareBufferForCreate(vkm::Buffer& buffer,
                             vk::BufferUsageFlags usageFlags,
                             vk::MemoryPropertyFlags memoryPropertyFlags)
@@ -135,8 +175,7 @@ void DDGIResources::create(vkm::VKMDevice* inDevice, const DDGIVolumeDesc& desc)
     destroy();
     device = inDevice;
     probeCount = calculateProbeCount(desc);
-    if (probeCount == 0u || desc.raysPerProbe == 0u) {
-        OutputMessage("[DDGI] Invalid DDGI volume: probeCount={} raysPerProbe={}\n", probeCount, desc.raysPerProbe);
+    if (!validateVolumeDesc(device->physicalDevice, desc, probeCount)) {
         device = nullptr;
         return;
     }

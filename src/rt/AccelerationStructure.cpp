@@ -165,7 +165,11 @@ BlasBuildInput makeBlasBuildInput(const scene::SceneMesh& mesh,
         .setIndexData(indexAddress);
 
     input.geometry.setGeometryType(vk::GeometryTypeKHR::eTriangles)
-        .setFlags(vk::GeometryFlagBitsKHR::eOpaque);
+        // DDGI probe tracing uses any-hit for alpha masked materials. Marking
+        // BLAS geometry opaque lets the implementation skip any-hit entirely,
+        // which turns curtains/leaves/cards into solid blockers and corrupts
+        // both probe radiance and classification distances.
+        .setFlags(vk::GeometryFlagsKHR{});
     input.geometry.geometry.setTriangles(triangles);
 
     input.buildRange.setPrimitiveCount(mesh.indexCount / 3u)

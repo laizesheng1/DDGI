@@ -19,6 +19,7 @@ namespace scene {
 struct SceneRtVertexAttributeGpuData {
     glm::vec4 normalAndMaterial{0.0f, 1.0f, 0.0f, 0.0f};
     glm::vec4 uvAndFlags{0.0f};
+    glm::vec4 tangentAndSign{1.0f, 0.0f, 0.0f, 1.0f};
 };
 
 /**
@@ -30,14 +31,20 @@ struct SceneRtMeshGpuData {
 };
 
 /**
- * Minimal material record for DDGI tracing. Texture sampling is deliberately
- * postponed until bindless/material descriptor plumbing exists, but base color
- * and emissive factors already make probe radiance match scene authoring much
- * better than a fixed debug color.
+ * Material record for DDGI tracing. Textures are bound as per-material arrays
+ * in the RT scene descriptor set, while this buffer stores scalar factors,
+ * alpha policy, and KHR_texture_transform scale/offset values. Keeping the
+ * material record separate from vulkan_base descriptors lets the DDGI hit
+ * shaders evolve without changing the shared glTF renderer.
  */
 struct SceneRtMaterialGpuData {
     glm::vec4 baseColorAndAlphaCutoff{1.0f, 1.0f, 1.0f, 0.5f};
     glm::vec4 emissiveAndFlags{0.0f};
+    glm::vec4 metallicRoughnessAndFlags{1.0f, 1.0f, 0.0f, 0.0f};
+    glm::vec4 baseColorTextureTransform{1.0f, 1.0f, 0.0f, 0.0f};
+    glm::vec4 normalTextureTransform{1.0f, 1.0f, 0.0f, 0.0f};
+    glm::vec4 metallicRoughnessTextureTransform{1.0f, 1.0f, 0.0f, 0.0f};
+    glm::vec4 emissiveTextureTransform{1.0f, 1.0f, 0.0f, 0.0f};
 };
 
 /**
@@ -54,11 +61,18 @@ private:
     vkm::Buffer rtVertexAttributeBuffer{};
     vkm::Buffer rtMeshBuffer{};
     vkm::Buffer rtMaterialBuffer{};
+    vkm::Texture2D fallbackWhiteTexture{};
+    vkm::Texture2D fallbackBlackTexture{};
+    vkm::Texture2D fallbackNormalTexture{};
     std::vector<glm::vec3> compactPositions{};
     std::vector<uint32_t> compactIndices{};
     std::vector<SceneRtVertexAttributeGpuData> compactVertexAttributes{};
     std::vector<SceneRtMeshGpuData> compactMeshGpuData{};
     std::vector<SceneRtMaterialGpuData> compactMaterialGpuData{};
+    std::vector<vk::DescriptorImageInfo> baseColorTextureDescriptors{};
+    std::vector<vk::DescriptorImageInfo> normalTextureDescriptors{};
+    std::vector<vk::DescriptorImageInfo> metallicRoughnessTextureDescriptors{};
+    std::vector<vk::DescriptorImageInfo> emissiveTextureDescriptors{};
     vk::DescriptorBufferInfo positionBufferInfo{};
     vk::DescriptorBufferInfo indexBufferInfo{};
     vk::DescriptorBufferInfo vertexAttributeBufferInfo{};
@@ -92,6 +106,10 @@ public:
     [[nodiscard]] vk::DescriptorBufferInfo vertexAttributeDescriptor() const { return vertexAttributeBufferInfo; }
     [[nodiscard]] vk::DescriptorBufferInfo meshDescriptor() const { return meshBufferInfo; }
     [[nodiscard]] vk::DescriptorBufferInfo materialDescriptor() const { return materialBufferInfo; }
+    [[nodiscard]] const std::vector<vk::DescriptorImageInfo>& baseColorTextureDescriptorArray() const { return baseColorTextureDescriptors; }
+    [[nodiscard]] const std::vector<vk::DescriptorImageInfo>& normalTextureDescriptorArray() const { return normalTextureDescriptors; }
+    [[nodiscard]] const std::vector<vk::DescriptorImageInfo>& metallicRoughnessTextureDescriptorArray() const { return metallicRoughnessTextureDescriptors; }
+    [[nodiscard]] const std::vector<vk::DescriptorImageInfo>& emissiveTextureDescriptorArray() const { return emissiveTextureDescriptors; }
     [[nodiscard]] const vkm::Buffer& vertexBuffer() const { return rtPositionBuffer; }
     [[nodiscard]] const vkm::Buffer& indexBuffer() const { return rtIndexBuffer; }
     [[nodiscard]] const vkm::Buffer& vertexAttributeBuffer() const { return rtVertexAttributeBuffer; }

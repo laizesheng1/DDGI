@@ -4,7 +4,10 @@ namespace renderer {
 
 void ForwardScenePass::record(vk::CommandBuffer, const scene::Scene&)
 {
-    // TODO: Forward fallback pass for early bring-up before GBuffer exists.
+    // The maintained forward fallback lives in Renderer::drawScene because it
+    // shares the renderer-owned pipeline layout and material descriptor set.
+    // This compatibility wrapper remains empty so older call sites can link
+    // without duplicating pipeline state outside Renderer.
 }
 
 } // namespace renderer

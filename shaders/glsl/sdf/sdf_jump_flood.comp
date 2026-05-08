@@ -1,0 +1,50 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#include "sdf_common.glsl"
+
+void main()
+{
+    ivec3 coord = ivec3(gl_GlobalInvocationID.xyz);
+    if (!sdfInside(coord)) {
+        return;
+    }
+
+    uint sourceSelector = constants.meshCountAndStep.z;
+    uint destSelector = constants.meshCountAndStep.w;
+    int stepSize = int(constants.meshCountAndStep.y);
+    vec3 voxelCenter = sdfWorldPositionFromCoord(coord);
+
+    vec4 bestSeed = sdfLoadSeed(sourceSelector, coord);
+    float bestDistanceSquared = bestSeed.w >= 0.0
+        ? dot(voxelCenter - bestSeed.xyz, voxelCenter - bestSeed.xyz)
+        : constants.originAndMaxDistance.w * constants.originAndMaxDistance.w;
+
+    // 3D JFA propagates sparse surface seeds through the volume. The 27-cell
+    // stencil is intentionally regular and deterministic; each pass only reads
+    // one source image and writes one destination image, so ping-pong barriers
+    // fully order the wavefront expansion.
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec3 candidateCoord = coord + ivec3(dx, dy, dz) * stepSize;
+                if (!sdfInside(candidateCoord)) {
+                    continue;
+                }
+                vec4 candidateSeed = sdfLoadSeed(sourceSelector, candidateCoord);
+                if (candidateSeed.w < 0.0) {
+                    continue;
+                }
+                float candidateDistanceSquared = dot(voxelCenter - candidateSeed.xyz, voxelCenter - candidateSeed.xyz);
+                if (candidateDistanceSquared < bestDistanceSquared) {
+                    bestDistanceSquared = candidateDistanceSquared;
+                    bestSeed = candidateSeed;
+                }
+            }
+        }
+    }
+
+    sdfStoreSeed(destSelector, coord, bestSeed);
+}

@@ -31,6 +31,9 @@ struct DDGIFrameConstants {
     vec4 stabilityParams;
     uvec4 updateParams;
     vec4 scrollAnchorAndMovement;
+    vec4 sdfOriginAndMaxDistance;
+    vec4 sdfVoxelSizeAndClearance;
+    uvec4 sdfResolutionAndFlags;
 };
 
 layout(set = 1, binding = 0) uniform DDGIConstantsBuffer {
@@ -134,6 +137,12 @@ vec3 ddgiQueryIndirectDiffuse(vec3 surfacePositionWorld, vec3 surfaceNormalWorld
 void main()
 {
     float depth = texture(gbufferDepth, inUV).r;
+    // The main swapchain render pass starts with an empty depth attachment,
+    // while the real scene depth lives in the offscreen GBuffer. Re-emitting
+    // that depth here lets later debug geometry, especially probe spheres, use
+    // fixed-function depth testing against the visible scene without drawing a
+    // second scene depth prepass or doing per-probe manual depth sampling.
+    gl_FragDepth = depth;
     if (depth >= 0.999999) {
         outColor = vec4(0.02, 0.025, 0.03, 1.0);
         return;
