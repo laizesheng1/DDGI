@@ -2,6 +2,8 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "../common/ddgi_common.glsl"
+#include "../common/pbr_common.glsl"
+#include "../common/light_common.glsl"
 
 layout(location = 0) in vec2 inUV;
 layout(location = 0) out vec4 outColor;
@@ -10,12 +12,12 @@ layout(set = 0, binding = 0) uniform sampler2D gbufferWorldPosition;
 layout(set = 0, binding = 1) uniform sampler2D gbufferNormal;
 layout(set = 0, binding = 2) uniform sampler2D gbufferAlbedo;
 layout(set = 0, binding = 3) uniform sampler2D gbufferMaterial;
-layout(set = 0, binding = 4) uniform sampler2D gbufferDepth;
+layout(set = 0, binding = 4) uniform sampler2D gbufferEmissive;
+layout(set = 0, binding = 5) uniform sampler2D gbufferDepth;
 
 layout(push_constant) uniform LightingPushConstants {
     vec4 cameraPosition;
-    vec4 lightDirectionAndIntensity;
-    vec4 options;
+    vec4 options; // x: DDGI enable, y: DDGI intensity, z: exposure, w: debug mode
 } pushConstants;
 
 struct DDGIFrameConstants {
@@ -34,6 +36,7 @@ struct DDGIFrameConstants {
     vec4 sdfOriginAndMaxDistance;
     vec4 sdfVoxelSizeAndClearance;
     uvec4 sdfResolutionAndFlags;
+    vec4 multiBounceParams;
 };
 
 layout(set = 1, binding = 0) uniform DDGIConstantsBuffer {
@@ -48,100 +51,22 @@ layout(set = 1, binding = 3, std430) readonly buffer ProbeStatesBuffer {
     uint probeStates[];
 };
 
-float ddgiLoadDepthMoment(uint probeIndex, vec3 probeToSurfaceDirection, bool squaredMoment)
-{
-    uint octSize = constants.atlasLayout.w;
-    uint tileSize = octSize + 2u;
-    vec2 octUv = ddgiOctEncode(probeToSurfaceDirection);
-    uvec2 octTexel = uvec2(clamp(floor(octUv * float(octSize)), vec2(0.0), vec2(float(octSize - 1u))));
-    ivec2 atlasTexel = ivec2(ddgiAtlasInteriorTexel(probeIndex, octTexel, constants.atlasLayout.x, tileSize));
-    return squaredMoment
-        ? imageLoad(depthSquaredAtlas, atlasTexel).r
-        : imageLoad(depthAtlas, atlasTexel).r;
-}
+layout(set = 2, binding = 0) uniform SceneLightingInfoBuffer {
+    SceneLightingInfo sceneLighting;
+};
 
-vec3 ddgiLoadIrradiance(uint probeIndex, vec3 surfaceNormalWorld)
-{
-    uint octSize = constants.atlasLayout.z;
-    uint tileSize = octSize + 2u;
-    vec2 octUv = ddgiOctEncode(surfaceNormalWorld);
-    uvec2 octTexel = uvec2(clamp(floor(octUv * float(octSize)), vec2(0.0), vec2(float(octSize - 1u))));
-    ivec2 atlasTexel = ivec2(ddgiAtlasInteriorTexel(probeIndex, octTexel, constants.atlasLayout.x, tileSize));
-    float irradianceGamma = max(constants.traceParams.y, 1.0);
-    // Irradiance atlas is gamma-encoded by the update pass for stability and
-    // precision. Lighting consumes linear irradiance, so decode at query time.
-    return pow(max(imageLoad(irradianceAtlas, atlasTexel).rgb, vec3(0.0)), vec3(irradianceGamma));
-}
+layout(set = 2, binding = 1, std430) readonly buffer SceneLightBuffer {
+    SceneLight sceneLights[];
+};
 
-float ddgiChebyshevVisibility(float receiverDistance, float meanDistance, float meanDistanceSquared)
-{
-    float variance = max(meanDistanceSquared - meanDistance * meanDistance, 0.02);
-    float distanceDelta = max(receiverDistance - meanDistance, 0.0);
-    float chebyshev = variance / (variance + distanceDelta * distanceDelta);
-    return receiverDistance <= meanDistance ? 1.0 : clamp(chebyshev, 0.0, 1.0);
-}
-
-vec3 ddgiQueryIndirectDiffuse(vec3 surfacePositionWorld, vec3 surfaceNormalWorld, vec3 viewDirectionWorld)
-{
-    vec3 biasedPositionWorld = ddgiApplySurfaceBias(
-        surfacePositionWorld,
-        surfaceNormalWorld,
-        viewDirectionWorld,
-        constants.biasAndDebug.x,
-        constants.biasAndDebug.y);
-
-    vec3 volumePosition = (biasedPositionWorld - constants.volumeOriginAndRays.xyz) /
-        constants.probeSpacingAndHysteresis.xyz;
-    ivec3 baseCell = ivec3(floor(volumePosition));
-    ivec3 maxBaseCell = ivec3(max(constants.probeCounts.xyz, uvec3(1u)) - uvec3(1u));
-    baseCell = clamp(baseCell, ivec3(0), max(maxBaseCell - ivec3(1), ivec3(0)));
-    vec3 trilinearAlpha = clamp(volumePosition - vec3(baseCell), vec3(0.0), vec3(1.0));
-
-    vec3 accumulatedIrradiance = vec3(0.0);
-    float accumulatedWeight = 0.0;
-
-    for (uint cornerIndex = 0u; cornerIndex < 8u; ++cornerIndex) {
-        uvec3 cornerOffset = uvec3(cornerIndex & 1u, (cornerIndex >> 1u) & 1u, (cornerIndex >> 2u) & 1u);
-        uvec3 probeCoord = uvec3(baseCell) + cornerOffset;
-        probeCoord = min(probeCoord, constants.probeCounts.xyz - uvec3(1u));
-        uint probeIndex = ddgiProbeIndex(probeCoord, constants.probeCounts.xyz);
-        if (((constants.updateParams.z & 2u) != 0u) && probeStates[probeIndex] != 0u) {
-            continue;
-        }
-
-        vec3 probePositionWorld = ddgiProbeWorldPosition(
-            probeCoord,
-            constants.volumeOriginAndRays.xyz,
-            constants.probeSpacingAndHysteresis.xyz);
-        vec3 probeToSurface = biasedPositionWorld - probePositionWorld;
-        float receiverDistance = length(probeToSurface);
-        vec3 probeToSurfaceDirection = ddgiSafeNormalize(probeToSurface);
-
-        vec3 cornerWeight = mix(1.0 - trilinearAlpha, trilinearAlpha, vec3(cornerOffset));
-        float trilinearWeight = cornerWeight.x * cornerWeight.y * cornerWeight.z;
-        float normalWeight = max(0.05, dot(surfaceNormalWorld, -probeToSurfaceDirection));
-        float meanDistance = ddgiLoadDepthMoment(probeIndex, probeToSurfaceDirection, false);
-        float meanDistanceSquared = ddgiLoadDepthMoment(probeIndex, probeToSurfaceDirection, true);
-        float visibilityWeight = ddgiChebyshevVisibility(receiverDistance, meanDistance, meanDistanceSquared);
-
-        float finalWeight = trilinearWeight * normalWeight * visibilityWeight;
-        accumulatedIrradiance += ddgiLoadIrradiance(probeIndex, surfaceNormalWorld) * finalWeight;
-        accumulatedWeight += finalWeight;
-    }
-
-    return accumulatedWeight > DDGI_EPSILON
-        ? accumulatedIrradiance / accumulatedWeight
-        : vec3(0.0);
-}
+#include "../common/ddgi_query.glsl"
 
 void main()
 {
     float depth = texture(gbufferDepth, inUV).r;
-    // The main swapchain render pass starts with an empty depth attachment,
-    // while the real scene depth lives in the offscreen GBuffer. Re-emitting
-    // that depth here lets later debug geometry, especially probe spheres, use
-    // fixed-function depth testing against the visible scene without drawing a
-    // second scene depth prepass or doing per-probe manual depth sampling.
+    // The main swapchain depth buffer is empty at fullscreen lighting time.
+    // Re-emitting GBuffer depth keeps debug geometry depth-tested against the
+    // visible scene without a second geometry prepass.
     gl_FragDepth = depth;
     if (depth >= 0.999999) {
         outColor = vec4(0.02, 0.025, 0.03, 1.0);
@@ -150,20 +75,42 @@ void main()
 
     vec3 surfacePositionWorld = texture(gbufferWorldPosition, inUV).xyz;
     vec3 surfaceNormalWorld = normalize(texture(gbufferNormal, inUV).xyz);
-    vec3 albedo = texture(gbufferAlbedo, inUV).rgb;
-    vec2 roughnessMetallic = texture(gbufferMaterial, inUV).rg;
-    vec3 viewDirectionWorld = normalize(pushConstants.cameraPosition.xyz - surfacePositionWorld);
-    vec3 lightDirectionWorld = normalize(pushConstants.lightDirectionAndIntensity.xyz);
+    vec4 albedoSample = texture(gbufferAlbedo, inUV);
+    vec4 materialSample = texture(gbufferMaterial, inUV);
+    vec3 emissive = texture(gbufferEmissive, inUV).rgb;
 
-    float directNdL = max(dot(surfaceNormalWorld, lightDirectionWorld), 0.0);
-    vec3 directDiffuse = albedo * directNdL * pushConstants.lightDirectionAndIntensity.w;
+    vec3 baseColor = max(albedoSample.rgb, vec3(0.0));
+    float roughness = clamp(materialSample.r, 0.04, 1.0);
+    float metallic = clamp(materialSample.g, 0.0, 1.0);
+    float occlusion = clamp(materialSample.b, 0.0, 1.0);
+    vec3 viewDirectionWorld = normalize(pushConstants.cameraPosition.xyz - surfacePositionWorld);
+
+    vec3 directLighting = vec3(0.0);
+    uint lightCount = min(sceneLighting.lightCounts.x, SCENE_MAX_LIGHTS);
+    for (uint lightIndex = 0u; lightIndex < lightCount; ++lightIndex) {
+        LightSample lightSample = evaluateSceneLight(sceneLights[lightIndex], surfacePositionWorld);
+        // Shadowing is intentionally centralized here when a shadow map or RT
+        // visibility resource is available. Until that resource is bound, the
+        // visibility term is one so the material/light semantics remain correct.
+        float visibility = 1.0;
+        directLighting += pbrEvaluateDirect(
+            baseColor,
+            metallic,
+            roughness,
+            surfaceNormalWorld,
+            viewDirectionWorld,
+            lightSample.directionToLight,
+            lightSample.radiance * visibility);
+    }
 
     vec3 indirectIrradiance = pushConstants.options.x > 0.5
-        ? ddgiQueryIndirectDiffuse(surfacePositionWorld, surfaceNormalWorld, viewDirectionWorld)
+        ? ddgiQueryIndirectIrradiance(surfacePositionWorld, surfaceNormalWorld, viewDirectionWorld, true)
         : vec3(0.0);
-    vec3 indirectDiffuse = indirectIrradiance * albedo * (pushConstants.options.y / DDGI_PI);
+    vec3 diffuseAlbedo = baseColor * (1.0 - metallic);
+    vec3 indirectDiffuse = indirectIrradiance * diffuseAlbedo * (pushConstants.options.y / DDGI_PI) * occlusion;
+    vec3 ambient = diffuseAlbedo * sceneLighting.ambientColorAndExposure.rgb * occlusion;
 
-    vec3 ambient = albedo * mix(0.04, 0.02, roughnessMetallic.x);
-    vec3 finalColor = ambient + directDiffuse + indirectDiffuse;
+    vec3 finalColor = directLighting + indirectDiffuse + ambient + emissive;
+    finalColor = acesTonemap(finalColor * max(pushConstants.options.z, 0.0));
     outColor = vec4(finalColor, 1.0);
 }

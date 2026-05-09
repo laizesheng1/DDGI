@@ -30,6 +30,7 @@ struct CompactGeometryData {
     std::vector<SceneRtMeshGpuData> meshGpuData{};
     std::vector<SceneRtMaterialGpuData> materialGpuData{};
     std::vector<SceneMesh> meshes{};
+    std::vector<SceneLightGpuData> lights{};
     uint32_t reversedWindingPrimitiveCount{0u};
 };
 
@@ -102,6 +103,27 @@ glm::mat4 makeNodeLocalMatrix(const tinygltf::Node& node)
         rotation *
         glm::scale(glm::mat4(1.0f), scale) *
         matrix;
+}
+
+glm::vec3 transformVector(const glm::mat4& transform, const glm::vec3& direction)
+{
+    const glm::vec3 transformed = glm::mat3(transform) * direction;
+    const float length = glm::length(transformed);
+    return length > 1.0e-5f ? transformed / length : direction;
+}
+
+SceneLightGpuData fallbackDirectionalLight()
+{
+    SceneLightGpuData light{};
+    light.positionAndType = glm::vec4(0.0f, 0.0f, 0.0f, static_cast<float>(SceneLightDirectional));
+    // Many sample Sponza glTF files do not carry KHR_lights_punctual. Use a
+    // clear upper-front directional key light so the PBR path is visibly lit
+    // even before DDGI has converged. The shader stores directional lights as
+    // "surface-to-light" vectors, not the physical ray travel direction.
+    light.directionAndRange = glm::vec4(glm::normalize(glm::vec3(-0.45f, 0.90f, -0.30f)), 0.0f);
+    light.colorAndIntensity = glm::vec4(1.0f, 0.96f, 0.88f, 5.0f);
+    light.spotAngles = glm::vec4(0.0f, -1.0f, 0.0f, 0.0f);
+    return light;
 }
 
 glm::vec2 readVec2(const tinygltf::Model& model, const tinygltf::Accessor& accessor, size_t vertexIndex)
@@ -243,6 +265,51 @@ void appendNodeGeometry(const tinygltf::Model& model,
     const float sceneHandedness = glm::determinant(glm::mat3(worldFromLocal)) *
         (kCompactRtSceneUsesFlipY ? -1.0f : 1.0f);
     const bool reversesHandedness = sceneHandedness < 0.0f;
+
+    const auto lightExtensionIt = node.extensions.find("KHR_lights_punctual");
+    if (lightExtensionIt != node.extensions.end() && lightExtensionIt->second.IsObject()) {
+        const tinygltf::Value& lightExtension = lightExtensionIt->second;
+        const tinygltf::Value& lightIndexValue = lightExtension.Get("light");
+        if (lightIndexValue.IsInt()) {
+            const int lightIndex = lightIndexValue.Get<int>();
+            if (lightIndex >= 0 && lightIndex < static_cast<int>(model.lights.size())) {
+                const tinygltf::Light& sourceLight = model.lights[lightIndex];
+                SceneLightGpuData light{};
+                const glm::vec3 positionWorld = glm::vec3(worldFromLocal * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+                // glTF punctual lights point down local -Z. The shader uses a
+                // direction from the shaded point toward the light for direct
+                // illumination, so store the opposite vector for directional
+                // lights and keep the physical -Z direction for spot cones.
+                const glm::vec3 lightForwardWorld = transformVector(worldFromLocal, glm::vec3(0.0f, 0.0f, -1.0f));
+                glm::vec3 color(1.0f);
+                if (sourceLight.color.size() >= 3u) {
+                    color = glm::vec3(
+                        static_cast<float>(sourceLight.color[0]),
+                        static_cast<float>(sourceLight.color[1]),
+                        static_cast<float>(sourceLight.color[2]));
+                }
+                uint32_t lightType = SceneLightPoint;
+                if (sourceLight.type == "directional") {
+                    lightType = SceneLightDirectional;
+                } else if (sourceLight.type == "spot") {
+                    lightType = SceneLightSpot;
+                }
+                light.positionAndType = glm::vec4(positionWorld, static_cast<float>(lightType));
+                light.directionAndRange = glm::vec4(
+                    lightType == SceneLightDirectional ? -lightForwardWorld : lightForwardWorld,
+                    static_cast<float>(sourceLight.range));
+                light.colorAndIntensity = glm::vec4(color, static_cast<float>(sourceLight.intensity));
+                const float inner = static_cast<float>(sourceLight.spot.innerConeAngle);
+                const float outer = static_cast<float>(sourceLight.spot.outerConeAngle);
+                light.spotAngles = glm::vec4(std::cos(inner), std::cos(outer), 0.0f, 0.0f);
+                if (kCompactRtSceneUsesFlipY) {
+                    light.positionAndType.y *= -1.0f;
+                    light.directionAndRange.y *= -1.0f;
+                }
+                output.lights.push_back(light);
+            }
+        }
+    }
 
     // Match vulkan_base/glTFModel.cpp traversal so primitive ordering stays
     // consistent with Scene::meshList and future debug output.
@@ -450,6 +517,12 @@ CompactGeometryData loadCompactGeometryFromGltf(const std::string& filename)
     for (int rootNodeIndex : defaultScene.nodes) {
         appendNodeGeometry(gltfModel, static_cast<uint32_t>(rootNodeIndex), glm::mat4(1.0f), output);
     }
+    if (output.lights.empty()) {
+        output.lights.push_back(fallbackDirectionalLight());
+        OutputMessage("[SceneGpuData] No KHR_lights_punctual lights found; using fallback directional light\n");
+    } else {
+        OutputMessage("[SceneGpuData] Loaded {} KHR_lights_punctual lights\n", static_cast<uint32_t>(output.lights.size()));
+    }
     return output;
 }
 
@@ -614,6 +687,10 @@ void SceneGpuData::create(vkm::VKMDevice* inDevice, const Scene& scene, vk::Queu
     compactMeshGpuData = compactGeometry.meshGpuData;
     compactMaterialGpuData = compactGeometry.materialGpuData;
     compactMeshes = compactGeometry.meshes;
+    lightGpuData = compactGeometry.lights.empty()
+        ? std::vector<SceneLightGpuData>{fallbackDirectionalLight()}
+        : compactGeometry.lights;
+    lightingGpuData.lightCounts = glm::uvec4(static_cast<uint32_t>(lightGpuData.size()), 0u, 0u, 0u);
     buildMaterialTextureDescriptors(
         scene.model(),
         fallbackWhiteTexture,
@@ -678,6 +755,20 @@ void SceneGpuData::create(vkm::VKMDevice* inDevice, const Scene& scene, vk::Queu
         compactMaterialGpuData.data(),
         static_cast<vk::DeviceSize>(compactMaterialGpuData.size() * sizeof(SceneRtMaterialGpuData)),
         vk::BufferUsageFlagBits::eStorageBuffer);
+    createUploadBuffer(
+        *device,
+        transferQueue,
+        lightBuffer,
+        lightGpuData.data(),
+        static_cast<vk::DeviceSize>(lightGpuData.size() * sizeof(SceneLightGpuData)),
+        vk::BufferUsageFlagBits::eStorageBuffer);
+    createUploadBuffer(
+        *device,
+        transferQueue,
+        lightingInfoBuffer,
+        &lightingGpuData,
+        sizeof(SceneLightingGpuData),
+        vk::BufferUsageFlagBits::eUniformBuffer);
 
     positionBufferDeviceAddress = getBufferDeviceAddress(device->logicalDevice, rtPositionBuffer.buffer);
     indexBufferDeviceAddress = getBufferDeviceAddress(device->logicalDevice, rtIndexBuffer.buffer);
@@ -699,12 +790,20 @@ void SceneGpuData::create(vkm::VKMDevice* inDevice, const Scene& scene, vk::Queu
     materialBufferInfo.setBuffer(rtMaterialBuffer.buffer)
         .setOffset(0)
         .setRange(static_cast<vk::DeviceSize>(compactMaterialGpuData.size() * sizeof(SceneRtMaterialGpuData)));
+    lightBufferInfo.setBuffer(lightBuffer.buffer)
+        .setOffset(0)
+        .setRange(static_cast<vk::DeviceSize>(lightGpuData.size() * sizeof(SceneLightGpuData)));
+    lightingInfoBufferInfo.setBuffer(lightingInfoBuffer.buffer)
+        .setOffset(0)
+        .setRange(sizeof(SceneLightingGpuData));
 
     created = positionBufferInfo.buffer != VK_NULL_HANDLE &&
         indexBufferInfo.buffer != VK_NULL_HANDLE &&
         vertexAttributeBufferInfo.buffer != VK_NULL_HANDLE &&
         meshBufferInfo.buffer != VK_NULL_HANDLE &&
         materialBufferInfo.buffer != VK_NULL_HANDLE &&
+        lightBufferInfo.buffer != VK_NULL_HANDLE &&
+        lightingInfoBufferInfo.buffer != VK_NULL_HANDLE &&
         positionBufferDeviceAddress != 0 &&
         indexBufferDeviceAddress != 0 &&
         !compactMeshes.empty();
@@ -715,16 +814,19 @@ void SceneGpuData::create(vkm::VKMDevice* inDevice, const Scene& scene, vk::Queu
     }
 
     OutputMessage(
-        "[SceneGpuData] RT geometry uploaded: {} vertices, {} indices, {} primitive ranges, {} winding-corrected ranges\n",
+        "[SceneGpuData] RT geometry uploaded: {} vertices, {} indices, {} primitive ranges, {} winding-corrected ranges, {} lights\n",
         vertexCount,
         indexCount,
         static_cast<uint32_t>(compactMeshes.size()),
-        compactGeometry.reversedWindingPrimitiveCount);
+        compactGeometry.reversedWindingPrimitiveCount,
+        static_cast<uint32_t>(lightGpuData.size()));
 }
 
 void SceneGpuData::destroy()
 {
     rtMaterialBuffer.destroy();
+    lightingInfoBuffer.destroy();
+    lightBuffer.destroy();
     rtMeshBuffer.destroy();
     rtVertexAttributeBuffer.destroy();
     rtIndexBuffer.destroy();
@@ -737,6 +839,8 @@ void SceneGpuData::destroy()
     compactVertexAttributes.clear();
     compactMeshGpuData.clear();
     compactMaterialGpuData.clear();
+    lightGpuData.clear();
+    lightingGpuData = {};
     baseColorTextureDescriptors.clear();
     normalTextureDescriptors.clear();
     metallicRoughnessTextureDescriptors.clear();
@@ -747,6 +851,8 @@ void SceneGpuData::destroy()
     vertexAttributeBufferInfo = vk::DescriptorBufferInfo{};
     meshBufferInfo = vk::DescriptorBufferInfo{};
     materialBufferInfo = vk::DescriptorBufferInfo{};
+    lightBufferInfo = vk::DescriptorBufferInfo{};
+    lightingInfoBufferInfo = vk::DescriptorBufferInfo{};
     positionBufferDeviceAddress = 0;
     indexBufferDeviceAddress = 0;
     vertexCount = 0u;

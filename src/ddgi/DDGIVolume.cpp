@@ -45,6 +45,9 @@ uint32_t updateFlags(const DDGIVolumeDesc& desc)
     if (desc.classificationEnabled) {
         flags |= static_cast<uint32_t>(ClassificationEnabled);
     }
+    if (desc.probeMultiBounceEnabled) {
+        flags |= static_cast<uint32_t>(ProbeMultiBounceEnabled);
+    }
     return flags;
 }
 
@@ -133,9 +136,10 @@ void createRtSceneDescriptors(vkm::VKMDevice& device,
         return;
     }
 
-    std::array<vk::DescriptorPoolSize, 3> poolSizes{
+    std::array<vk::DescriptorPoolSize, 4> poolSizes{
         vk::DescriptorPoolSize{vk::DescriptorType::eAccelerationStructureKHR, 1u},
-        vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 4u},
+        vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 5u},
+        vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 1u},
         vk::DescriptorPoolSize{vk::DescriptorType::eCombinedImageSampler, kMaxRtMaterialTextures * 4u},
     };
 
@@ -162,11 +166,13 @@ void updateRtSceneDescriptor(vk::Device logicalDevice,
     vk::WriteDescriptorSetAccelerationStructureKHR accelerationStructureWrite{};
     accelerationStructureWrite.setAccelerationStructures(scene.topLevelAccelerationStructure);
 
-    std::array<vk::DescriptorBufferInfo, 4> bufferInfos{
+    std::array<vk::DescriptorBufferInfo, 6> bufferInfos{
         scene.gpuData->vertexAttributeDescriptor(),
         scene.gpuData->indexDescriptor(),
         scene.gpuData->meshDescriptor(),
         scene.gpuData->materialDescriptor(),
+        scene.gpuData->lightingInfoDescriptor(),
+        scene.gpuData->lightDescriptor(),
     };
 
     auto makePaddedImageArray = [](const std::vector<vk::DescriptorImageInfo>& source) {
@@ -191,14 +197,14 @@ void updateRtSceneDescriptor(vk::Device logicalDevice,
         return;
     }
 
-    std::array<vk::WriteDescriptorSet, 9> descriptorWrites{};
+    std::array<vk::WriteDescriptorSet, 11> descriptorWrites{};
     descriptorWrites[0].setDstSet(descriptorSet)
         .setDstBinding(0)
         .setDescriptorCount(1)
         .setDescriptorType(vk::DescriptorType::eAccelerationStructureKHR)
         .setPNext(&accelerationStructureWrite);
 
-    for (uint32_t writeIndex = 1u; writeIndex <= static_cast<uint32_t>(bufferInfos.size()); ++writeIndex) {
+    for (uint32_t writeIndex = 1u; writeIndex <= 4u; ++writeIndex) {
         descriptorWrites[writeIndex].setDstSet(descriptorSet)
             .setDstBinding(writeIndex)
             .setDescriptorCount(1)
@@ -218,6 +224,16 @@ void updateRtSceneDescriptor(vk::Device logicalDevice,
             .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
             .setPImageInfo(textureArrays[textureWriteIndex]);
     }
+    descriptorWrites[9].setDstSet(descriptorSet)
+        .setDstBinding(9)
+        .setDescriptorCount(1)
+        .setDescriptorType(vk::DescriptorType::eUniformBuffer)
+        .setPBufferInfo(&bufferInfos[4]);
+    descriptorWrites[10].setDstSet(descriptorSet)
+        .setDstBinding(10)
+        .setDescriptorCount(1)
+        .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+        .setPBufferInfo(&bufferInfos[5]);
 
     // The RT scene descriptor set is updated only when the TLAS changes. These
     // storage buffers and per-material texture arrays are immutable for the
@@ -321,6 +337,11 @@ void DDGIVolume::updateConstants(const Camera& camera, uint32_t frameIndex)
         sdfDesc.voxelSize,
         std::max(desc.probeMinFrontfaceDistance, desc.sdfProbePushDistance));
     constants.sdfResolutionAndFlags = glm::uvec4(sdfDesc.resolution, sdfBound ? 1u : 0u);
+    constants.multiBounceParams = glm::vec4(
+        std::max(desc.probeMultiBounceIntensity, 0.0f),
+        std::max(desc.probeMultiBounceMaxRadiance, 0.0f),
+        0.0f,
+        0.0f);
     resourceSet.updateConstants(constants);
 }
 
@@ -342,6 +363,7 @@ void DDGIVolume::traceProbeRays(vk::CommandBuffer commandBuffer, const rt::RayTr
     }
 
     resourceSet.recordInitialLayoutTransitions(commandBuffer);
+    resourceSet.recordAtlasTraceReadBarrier(commandBuffer);
     recordComputeToRayTracingBarrier(commandBuffer, resourceSet.probeOffsets());
     recordComputeToRayTracingBarrier(commandBuffer, resourceSet.probeStates());
     if (boundTopLevelAccelerationStructure != scene.topLevelAccelerationStructure) {
@@ -392,6 +414,7 @@ void DDGIVolume::updateProbes(vk::CommandBuffer commandBuffer)
 
     resourceSet.recordInitialLayoutTransitions(commandBuffer);
     resourceSet.recordProbeRayReadBarrier(commandBuffer);
+    resourceSet.recordAtlasTraceReadToComputeWriteBarrier(commandBuffer);
 
     commandBuffer.bindDescriptorSets(
         vk::PipelineBindPoint::eCompute,

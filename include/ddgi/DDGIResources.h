@@ -112,6 +112,20 @@ public:
     void recordProbeRayReadBarrier(vk::CommandBuffer commandBuffer) const;
 
     /**
+     * Make the previous/history atlas contents visible to probe ray closest-hit
+     * shaders. Multi-bounce tracing reads these images before this frame's
+     * compute update writes new atlas values.
+     */
+    void recordAtlasTraceReadBarrier(vk::CommandBuffer commandBuffer) const;
+
+    /**
+     * Order closest-hit atlas reads before compute writes the new probe atlas.
+     * This keeps the multi-bounce feedback path one-frame/history based rather
+     * than racing with the current frame update.
+     */
+    void recordAtlasTraceReadToComputeWriteBarrier(vk::CommandBuffer commandBuffer) const;
+
+    /**
      * Synchronize atlas shader writes before later shader reads/writes.
      * commandBuffer must be recording.
      */

@@ -21,6 +21,7 @@ struct DDGIFrameConstants {
     vec4 sdfOriginAndMaxDistance;
     vec4 sdfVoxelSizeAndClearance;
     uvec4 sdfResolutionAndFlags;
+    vec4 multiBounceParams;
 };
 
 struct DDGIProbeRayData {
@@ -96,14 +97,14 @@ void main()
         accumulatedWeight += cosineWeight;
     }
 
+    // accumulatedRadiance / accumulatedWeight is the cosine-weighted average
+    // incoming radiance. Irradiance is the cosine-weighted hemispherical
+    // integral, so multiply by PI before storing the value that lighting later
+    // converts to diffuse radiance with albedo / PI. Without this scale the
+    // atlas feedback is visibly too dim and multi-bounce changes are buried.
     vec3 newIrradiance = accumulatedWeight > DDGI_EPSILON
-        ? accumulatedRadiance / accumulatedWeight
+        ? (accumulatedRadiance / accumulatedWeight) * DDGI_PI
         : vec3(0.0);
-
-    float brightnessLimit = max(constants.stabilityParams.y, 0.0);
-    if (brightnessLimit > 0.0) {
-        newIrradiance = min(newIrradiance, vec3(brightnessLimit));
-    }
 
     ivec2 atlasTexel = ivec2(gl_GlobalInvocationID.xy);
     float irradianceGamma = max(constants.traceParams.y, 1.0);
@@ -112,13 +113,34 @@ void main()
     // precision in low radiance values, while lighting decodes it back to
     // linear space before applying albedo.
     vec3 previousIrradiance = pow(previousEncodedIrradiance, vec3(irradianceGamma));
+
+    float brightnessThreshold = max(constants.stabilityParams.y, 0.0);
+    if (brightnessThreshold > 0.0 && constants.probeCounts.w > 0u) {
+        // RTXGI uses a brightness threshold to prevent a single noisy probe ray
+        // update from injecting a large impulse into the irradiance history.
+        // Treat the threshold as a maximum frame-to-frame increase over the
+        // existing history, rather than an absolute radiance cap. This keeps
+        // bright areas bright while damping temporal spikes in indirect-only
+        // regions where flicker is most visible.
+        float previousBrightness = max(max(previousIrradiance.r, previousIrradiance.g), previousIrradiance.b);
+        float newBrightness = max(max(newIrradiance.r, newIrradiance.g), newIrradiance.b);
+        float allowedBrightness = previousBrightness + brightnessThreshold;
+        if (newBrightness > allowedBrightness && newBrightness > DDGI_EPSILON) {
+            newIrradiance *= allowedBrightness / newBrightness;
+        }
+    }
+
     float hysteresis = constants.probeCounts.w == 0u ? 0.0 : clamp(constants.probeSpacingAndHysteresis.w, 0.0, 1.0);
     float changeThreshold = max(constants.stabilityParams.x, 0.0);
-    if (length(newIrradiance - previousIrradiance) > changeThreshold) {
-        // Large radiance changes should converge faster. Lowering hysteresis
-        // here is a first, conservative approximation of RTXGI's adaptive
-        // history policy and helps clear stale atlas values after edits.
-        hysteresis = min(hysteresis, 0.50);
+    float maxChannelDifference = max(
+        max(abs(newIrradiance.r - previousIrradiance.r), abs(newIrradiance.g - previousIrradiance.g)),
+        abs(newIrradiance.b - previousIrradiance.b));
+    if (maxChannelDifference > changeThreshold) {
+        // The threshold follows RTXGI's "maximum color component change"
+        // intuition. Do not collapse hysteresis for normal sampling variance;
+        // reducing it only a little preserves temporal stability while still
+        // letting explicit clears or real lighting edits settle reasonably.
+        hysteresis = min(hysteresis, 0.95);
     }
     vec3 blendedIrradiance = mix(previousIrradiance, newIrradiance, 1.0 - hysteresis);
     vec3 encodedIrradiance = pow(max(blendedIrradiance, vec3(0.0)), vec3(1.0 / irradianceGamma));

@@ -75,6 +75,8 @@ private:
     vk::PhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures{};
     vk::PhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures{};
     vk::PhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddressFeatures{};
+    vk::PhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT shaderDemoteFeatures{};
+    vk::PhysicalDeviceVulkan13Features vulkan13Features{};
 
 public:
     DDGISample();

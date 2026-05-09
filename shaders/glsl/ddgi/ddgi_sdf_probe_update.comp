@@ -18,6 +18,7 @@ struct DDGIFrameConstants {
     vec4 sdfOriginAndMaxDistance;
     vec4 sdfVoxelSizeAndClearance;
     uvec4 sdfResolutionAndFlags;
+    vec4 multiBounceParams;
 };
 
 layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {

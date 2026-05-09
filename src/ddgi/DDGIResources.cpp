@@ -439,12 +439,14 @@ void DDGIResources::recordClearAtlases(vk::CommandBuffer commandBuffer) const
     }
 
     // Clear uses the transfer pipeline, while subsequent DDGI passes read and
-    // write the same storage images in compute and fragment shaders. This
+    // write the same storage images in RT, compute, and fragment shaders. This
     // barrier makes a user-triggered history reset visible without changing
     // the long-lived General layout used by the atlas descriptors.
     commandBuffer.pipelineBarrier(
         vk::PipelineStageFlagBits::eTransfer,
-        vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eFragmentShader,
+        vk::PipelineStageFlagBits::eRayTracingShaderKHR |
+            vk::PipelineStageFlagBits::eComputeShader |
+            vk::PipelineStageFlagBits::eFragmentShader,
         {},
         {},
         {},
@@ -476,6 +478,93 @@ void DDGIResources::recordProbeRayReadBarrier(vk::CommandBuffer commandBuffer) c
         {},
         barriers,
         {});
+}
+
+void DDGIResources::recordAtlasTraceReadBarrier(vk::CommandBuffer commandBuffer) const
+{
+    if (!created) {
+        return;
+    }
+
+    vk::ImageSubresourceRange subresourceRange{};
+    subresourceRange.setAspectMask(vk::ImageAspectFlagBits::eColor)
+        .setBaseMipLevel(0)
+        .setLevelCount(1)
+        .setBaseArrayLayer(0)
+        .setLayerCount(1);
+
+    std::array<vk::ImageMemoryBarrier, 3> barriers{};
+    const std::array<vk::Image, 3> images{
+        textureSet.irradiance.image,
+        textureSet.depth.image,
+        textureSet.depthSquared.image,
+    };
+
+    for (size_t imageIndex = 0; imageIndex < images.size(); ++imageIndex) {
+        barriers[imageIndex].setOldLayout(vk::ImageLayout::eGeneral)
+            .setNewLayout(vk::ImageLayout::eGeneral)
+            .setSrcAccessMask(vk::AccessFlagBits::eShaderWrite)
+            .setDstAccessMask(vk::AccessFlagBits::eShaderRead)
+            .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+            .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+            .setImage(images[imageIndex])
+            .setSubresourceRange(subresourceRange);
+    }
+
+    // Probe tracing samples the atlas from the previous/history update to
+    // estimate multi-bounce diffuse radiance at hit points. This barrier makes
+    // earlier compute atlas writes visible to RT closest-hit imageLoad() calls
+    // while keeping the image layout General for storage image descriptors.
+    commandBuffer.pipelineBarrier(
+        vk::PipelineStageFlagBits::eComputeShader,
+        vk::PipelineStageFlagBits::eRayTracingShaderKHR,
+        {},
+        {},
+        {},
+        barriers);
+}
+
+void DDGIResources::recordAtlasTraceReadToComputeWriteBarrier(vk::CommandBuffer commandBuffer) const
+{
+    if (!created) {
+        return;
+    }
+
+    vk::ImageSubresourceRange subresourceRange{};
+    subresourceRange.setAspectMask(vk::ImageAspectFlagBits::eColor)
+        .setBaseMipLevel(0)
+        .setLevelCount(1)
+        .setBaseArrayLayer(0)
+        .setLayerCount(1);
+
+    std::array<vk::ImageMemoryBarrier, 3> barriers{};
+    const std::array<vk::Image, 3> images{
+        textureSet.irradiance.image,
+        textureSet.depth.image,
+        textureSet.depthSquared.image,
+    };
+
+    for (size_t imageIndex = 0; imageIndex < images.size(); ++imageIndex) {
+        barriers[imageIndex].setOldLayout(vk::ImageLayout::eGeneral)
+            .setNewLayout(vk::ImageLayout::eGeneral)
+            .setSrcAccessMask(vk::AccessFlagBits::eShaderRead)
+            .setDstAccessMask(vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite)
+            .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+            .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+            .setImage(images[imageIndex])
+            .setSubresourceRange(subresourceRange);
+    }
+
+    // Trace reads must finish before the update passes write the current frame
+    // atlas. This prevents same-frame feedback; L_multi always comes from the
+    // atlas history visible at the start of probe tracing.
+    commandBuffer.pipelineBarrier(
+        vk::PipelineStageFlagBits::eRayTracingShaderKHR,
+        vk::PipelineStageFlagBits::eComputeShader,
+        {},
+        {},
+        {},
+        barriers);
 }
 
 void DDGIResources::recordAtlasWriteBarrier(vk::CommandBuffer commandBuffer) const
@@ -510,11 +599,14 @@ void DDGIResources::recordAtlasWriteBarrier(vk::CommandBuffer commandBuffer) con
     }
 
     // DDGI update passes read previous atlas values for hysteresis and then
-    // write new values. Keeping the layout General and synchronizing access is
-    // cheaper than bouncing between Storage and ShaderReadOnly layouts per pass.
+    // write new values. The next frame's probe tracing also reads these atlases
+    // for diffuse multi-bounce feedback, so make writes visible to RT as well
+    // as compute/fragment consumers.
     commandBuffer.pipelineBarrier(
         vk::PipelineStageFlagBits::eComputeShader,
-        vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eFragmentShader,
+        vk::PipelineStageFlagBits::eRayTracingShaderKHR |
+            vk::PipelineStageFlagBits::eComputeShader |
+            vk::PipelineStageFlagBits::eFragmentShader,
         {},
         {},
         {},

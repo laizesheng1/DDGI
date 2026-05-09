@@ -20,6 +20,7 @@ private:
     vkm::Texture2D normalTexture{};
     vkm::Texture2D albedoTexture{};
     vkm::Texture2D materialTexture{};
+    vkm::Texture2D emissiveTexture{};
     vkm::Texture2D depthTexture{};
 
 public:
@@ -52,6 +53,7 @@ public:
     [[nodiscard]] const vkm::Texture2D& normal() const { return normalTexture; }
     [[nodiscard]] const vkm::Texture2D& albedo() const { return albedoTexture; }
     [[nodiscard]] const vkm::Texture2D& material() const { return materialTexture; }
+    [[nodiscard]] const vkm::Texture2D& emissive() const { return emissiveTexture; }
     [[nodiscard]] const vkm::Texture2D& depth() const { return depthTexture; }
 };
 

@@ -19,6 +19,7 @@ constexpr vk::Format kWorldPositionFormat = vk::Format::eR16G16B16A16Sfloat;
 constexpr vk::Format kNormalFormat = vk::Format::eR16G16B16A16Sfloat;
 constexpr vk::Format kAlbedoFormat = vk::Format::eR8G8B8A8Unorm;
 constexpr vk::Format kMaterialFormat = vk::Format::eR8G8B8A8Unorm;
+constexpr vk::Format kEmissiveFormat = vk::Format::eR16G16B16A16Sfloat;
 
 std::string shaderPath(const char* relativePath)
 {
@@ -67,13 +68,14 @@ vk::PipelineShaderStageCreateInfo makeStage(vk::ShaderModule shaderModule, vk::S
     return shaderStage;
 }
 
-std::array<vk::VertexInputAttributeDescription, 4> sceneVertexAttributes()
+std::array<vk::VertexInputAttributeDescription, 5> sceneVertexAttributes()
 {
     return {
         vk::VertexInputAttributeDescription{0, 0, vk::Format::eR32G32B32Sfloat, offsetof(vkmglTF::Vertex, pos)},
         vk::VertexInputAttributeDescription{1, 0, vk::Format::eR32G32B32Sfloat, offsetof(vkmglTF::Vertex, normal)},
         vk::VertexInputAttributeDescription{2, 0, vk::Format::eR32G32Sfloat, offsetof(vkmglTF::Vertex, uv)},
         vk::VertexInputAttributeDescription{3, 0, vk::Format::eR32G32B32A32Sfloat, offsetof(vkmglTF::Vertex, color)},
+        vk::VertexInputAttributeDescription{4, 0, vk::Format::eR32G32B32A32Sfloat, offsetof(vkmglTF::Vertex, tangent)},
     };
 }
 
@@ -174,6 +176,14 @@ void GBufferPass::create(vkm::VKMDevice* inDevice,
         vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled,
         vk::ImageAspectFlagBits::eColor,
         vk::ImageLayout::eShaderReadOnlyOptimal);
+    createAttachmentTexture(
+        *device,
+        emissiveTexture,
+        framebufferExtent,
+        kEmissiveFormat,
+        vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled,
+        vk::ImageAspectFlagBits::eColor,
+        vk::ImageLayout::eShaderReadOnlyOptimal);
 
     vk::ImageAspectFlags depthAspectMask = vk::ImageAspectFlagBits::eDepth;
     if (formatHasStencil(depthFormat)) {
@@ -189,7 +199,7 @@ void GBufferPass::create(vkm::VKMDevice* inDevice,
         vk::ImageAspectFlagBits::eDepth,
         vk::ImageLayout::eDepthStencilReadOnlyOptimal);
 
-    std::array<vk::AttachmentDescription, 5> attachments{};
+    std::array<vk::AttachmentDescription, 6> attachments{};
     for (vk::AttachmentDescription& attachment : attachments) {
         attachment.setSamples(vk::SampleCountFlagBits::e1)
             .setLoadOp(vk::AttachmentLoadOp::eClear)
@@ -202,15 +212,17 @@ void GBufferPass::create(vkm::VKMDevice* inDevice,
     attachments[1].setFormat(kNormalFormat).setFinalLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
     attachments[2].setFormat(kAlbedoFormat).setFinalLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
     attachments[3].setFormat(kMaterialFormat).setFinalLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
-    attachments[4].setFormat(depthFormat).setFinalLayout(vk::ImageLayout::eDepthStencilReadOnlyOptimal);
+    attachments[4].setFormat(kEmissiveFormat).setFinalLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
+    attachments[5].setFormat(depthFormat).setFinalLayout(vk::ImageLayout::eDepthStencilReadOnlyOptimal);
 
-    std::array<vk::AttachmentReference, 4> colorAttachments{
+    std::array<vk::AttachmentReference, 5> colorAttachments{
         vk::AttachmentReference{0, vk::ImageLayout::eColorAttachmentOptimal},
         vk::AttachmentReference{1, vk::ImageLayout::eColorAttachmentOptimal},
         vk::AttachmentReference{2, vk::ImageLayout::eColorAttachmentOptimal},
         vk::AttachmentReference{3, vk::ImageLayout::eColorAttachmentOptimal},
+        vk::AttachmentReference{4, vk::ImageLayout::eColorAttachmentOptimal},
     };
-    vk::AttachmentReference depthAttachment{4, vk::ImageLayout::eDepthStencilAttachmentOptimal};
+    vk::AttachmentReference depthAttachment{5, vk::ImageLayout::eDepthStencilAttachmentOptimal};
 
     vk::SubpassDescription subpass{};
     subpass.setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
@@ -237,11 +249,12 @@ void GBufferPass::create(vkm::VKMDevice* inDevice,
         .setDependencies(dependencies);
     VK_CHECK_RESULT(device->logicalDevice.createRenderPass(&renderPassCreateInfo, nullptr, &renderPassHandle));
 
-    std::array<vk::ImageView, 5> attachmentViews{
+    std::array<vk::ImageView, 6> attachmentViews{
         worldPositionTexture.imageView,
         normalTexture.imageView,
         albedoTexture.imageView,
         materialTexture.imageView,
+        emissiveTexture.imageView,
         depthTexture.imageView,
     };
     vk::FramebufferCreateInfo framebufferCreateInfo{};
@@ -252,17 +265,19 @@ void GBufferPass::create(vkm::VKMDevice* inDevice,
         .setLayers(1);
     VK_CHECK_RESULT(device->logicalDevice.createFramebuffer(&framebufferCreateInfo, nullptr, &framebufferHandle));
 
-    vk::PushConstantRange pushConstantRange{};
-    pushConstantRange.setStageFlags(vk::ShaderStageFlagBits::eVertex)
+    std::array<vk::PushConstantRange, 2> pushConstantRanges{};
+    pushConstantRanges[0].setStageFlags(vk::ShaderStageFlagBits::eVertex)
         .setOffset(0)
         .setSize(sizeof(GBufferPushConstants));
+    pushConstantRanges[1].setStageFlags(vk::ShaderStageFlagBits::eFragment)
+        .setOffset(vkmglTF::MaterialPushConstantOffset)
+        .setSize(sizeof(vkmglTF::MaterialPushConstants));
 
     vk::DescriptorSetLayout materialSetLayout = vkmglTF::descriptorSetLayoutImage;
     vk::PipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
     pipelineLayoutCreateInfo.setSetLayoutCount(1)
         .setPSetLayouts(&materialSetLayout)
-        .setPushConstantRangeCount(1)
-        .setPPushConstantRanges(&pushConstantRange);
+        .setPushConstantRanges(pushConstantRanges);
     VK_CHECK_RESULT(device->logicalDevice.createPipelineLayout(&pipelineLayoutCreateInfo, nullptr, &pipelineLayoutHandle));
 
     std::array<vk::ShaderModule, 2> shaderModules{
@@ -285,7 +300,7 @@ void GBufferPass::create(vkm::VKMDevice* inDevice,
     };
 
     vk::VertexInputBindingDescription vertexBinding{0, sizeof(vkmglTF::Vertex), vk::VertexInputRate::eVertex};
-    const std::array<vk::VertexInputAttributeDescription, 4> vertexAttributes = sceneVertexAttributes();
+    const std::array<vk::VertexInputAttributeDescription, 5> vertexAttributes = sceneVertexAttributes();
     vk::PipelineVertexInputStateCreateInfo vertexInputState{};
     vertexInputState.setVertexBindingDescriptionCount(1)
         .setPVertexBindingDescriptions(&vertexBinding)
@@ -314,7 +329,7 @@ void GBufferPass::create(vkm::VKMDevice* inDevice,
         .setDepthBoundsTestEnable(VK_FALSE)
         .setStencilTestEnable(VK_FALSE);
 
-    std::array<vk::PipelineColorBlendAttachmentState, 4> colorBlendAttachments{};
+    std::array<vk::PipelineColorBlendAttachmentState, 5> colorBlendAttachments{};
     for (vk::PipelineColorBlendAttachmentState& attachment : colorBlendAttachments) {
         attachment.setBlendEnable(VK_FALSE)
             .setColorWriteMask(vk::ColorComponentFlagBits::eR |
@@ -377,6 +392,7 @@ void GBufferPass::destroy()
     }
 
     destroyTexture(depthTexture);
+    destroyTexture(emissiveTexture);
     destroyTexture(materialTexture);
     destroyTexture(albedoTexture);
     destroyTexture(normalTexture);
@@ -409,12 +425,13 @@ void GBufferPass::record(vk::CommandBuffer commandBuffer,
         return;
     }
 
-    std::array<vk::ClearValue, 5> clearValues{};
+    std::array<vk::ClearValue, 6> clearValues{};
     clearValues[0].setColor(vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}));
     clearValues[1].setColor(vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}));
     clearValues[2].setColor(vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}));
     clearValues[3].setColor(vk::ClearColorValue(std::array<float, 4>{1.0f, 0.0f, 1.0f, 0.0f}));
-    clearValues[4].setDepthStencil(vk::ClearDepthStencilValue(1.0f, 0));
+    clearValues[4].setColor(vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}));
+    clearValues[5].setDepthStencil(vk::ClearDepthStencilValue(1.0f, 0));
 
     vk::RenderPassBeginInfo renderPassBeginInfo{};
     renderPassBeginInfo.setRenderPass(renderPassHandle)
@@ -449,33 +466,36 @@ void GBufferPass::record(vk::CommandBuffer commandBuffer,
     // the later fullscreen lighting pass consumes.
     scene.model().draw(
         commandBuffer,
-        vkmglTF::RenderFlags::BindImages | vkmglTF::RenderFlags::RenderOpaqueNodes,
+        vkmglTF::RenderFlags::BindImages | vkmglTF::RenderFlags::PushMaterialConstants | vkmglTF::RenderFlags::RenderOpaqueNodes,
         pipelineLayoutHandle,
         0);
     scene.model().draw(
         commandBuffer,
-        vkmglTF::RenderFlags::BindImages | vkmglTF::RenderFlags::RenderAlphaMaskedNodes,
+        vkmglTF::RenderFlags::BindImages | vkmglTF::RenderFlags::PushMaterialConstants | vkmglTF::RenderFlags::RenderAlphaMaskedNodes,
         pipelineLayoutHandle,
         0);
 
     commandBuffer.endRenderPass();
 
-    std::array<vk::ImageMemoryBarrier, 5> readBarriers{};
-    const std::array<vk::Image, 5> images{
+    std::array<vk::ImageMemoryBarrier, 6> readBarriers{};
+    const std::array<vk::Image, 6> images{
         worldPositionTexture.image,
         normalTexture.image,
         albedoTexture.image,
         materialTexture.image,
+        emissiveTexture.image,
         depthTexture.image,
     };
-    const std::array<vk::ImageLayout, 5> layouts{
+    const std::array<vk::ImageLayout, 6> layouts{
+        vk::ImageLayout::eShaderReadOnlyOptimal,
         vk::ImageLayout::eShaderReadOnlyOptimal,
         vk::ImageLayout::eShaderReadOnlyOptimal,
         vk::ImageLayout::eShaderReadOnlyOptimal,
         vk::ImageLayout::eShaderReadOnlyOptimal,
         vk::ImageLayout::eDepthStencilReadOnlyOptimal,
     };
-    const std::array<vk::ImageAspectFlags, 5> aspects{
+    const std::array<vk::ImageAspectFlags, 6> aspects{
+        vk::ImageAspectFlagBits::eColor,
         vk::ImageAspectFlagBits::eColor,
         vk::ImageAspectFlagBits::eColor,
         vk::ImageAspectFlagBits::eColor,
@@ -491,7 +511,7 @@ void GBufferPass::record(vk::CommandBuffer commandBuffer,
             .setLayerCount(1);
         readBarriers[imageIndex].setOldLayout(layouts[imageIndex])
             .setNewLayout(layouts[imageIndex])
-            .setSrcAccessMask(imageIndex == 4
+            .setSrcAccessMask(imageIndex == 5
                                   ? vk::AccessFlagBits::eDepthStencilAttachmentWrite
                                   : vk::AccessFlagBits::eColorAttachmentWrite)
             .setDstAccessMask(vk::AccessFlagBits::eShaderRead)
@@ -506,7 +526,9 @@ void GBufferPass::record(vk::CommandBuffer commandBuffer,
     // attachment-write -> fragment-read barrier avoids hidden dependencies on
     // the swapchain render pass.
     commandBuffer.pipelineBarrier(
-        vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eLateFragmentTests,
+        vk::PipelineStageFlagBits::eColorAttachmentOutput |
+            vk::PipelineStageFlagBits::eEarlyFragmentTests |
+            vk::PipelineStageFlagBits::eLateFragmentTests,
         vk::PipelineStageFlagBits::eFragmentShader,
         {},
         {},

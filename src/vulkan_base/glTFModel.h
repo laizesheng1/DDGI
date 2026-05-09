@@ -21,7 +21,10 @@ namespace vkmglTF {
 
 	enum DescriptorBindingFlags {
 		ImageBaseColor = 0x00000001,
-		ImageNormalMap = 0x00000002
+		ImageNormalMap = 0x00000002,
+		ImageMetallicRoughness = 0x00000004,
+		ImageEmissive = 0x00000008,
+		ImageOcclusion = 0x00000010
 	};
 
 	extern vk::DescriptorSetLayout descriptorSetLayoutImage;
@@ -40,6 +43,26 @@ namespace vkmglTF {
 	using Texture = vkm::Texture2D;
 	struct Node;
 
+	enum MaterialFlagBits {
+		MaterialFlagAlphaMask = 0x00000001,
+		MaterialFlagAlphaBlend = 0x00000002,
+		MaterialFlagDoubleSided = 0x00000004,
+		MaterialFlagBaseColorTexture = 0x00000008,
+		MaterialFlagNormalTexture = 0x00000010,
+		MaterialFlagMetallicRoughnessTexture = 0x00000020,
+		MaterialFlagEmissiveTexture = 0x00000040,
+		MaterialFlagOcclusionTexture = 0x00000080
+	};
+
+	struct MaterialPushConstants {
+		glm::vec4 baseColorFactor{1.0f};
+		glm::vec4 emissiveFactorAndAlphaCutoff{0.0f, 0.0f, 0.0f, 1.0f};
+		glm::vec4 metallicRoughnessOcclusionFlags{1.0f, 1.0f, 1.0f, 0.0f};
+		glm::vec4 normalScaleAndPadding{1.0f, 0.0f, 0.0f, 0.0f};
+	};
+
+	constexpr uint32_t MaterialPushConstantOffset = sizeof(glm::mat4);
+
 /*
 	glTF material class
 */
@@ -54,7 +77,17 @@ public:
 	float alphaCutoff = 1.0f;
 	float metallicFactor = 1.0f;
 	float roughnessFactor = 1.0f;
+	float normalScale = 1.0f;
+	float occlusionStrength = 1.0f;
+	float emissiveStrength = 1.0f;
+	bool doubleSided = false;
 	glm::vec4 baseColorFactor = glm::vec4(1.0f);
+	glm::vec3 emissiveFactor = glm::vec3(0.0f);
+	bool hasBaseColorTexture = false;
+	bool hasMetallicRoughnessTexture = false;
+	bool hasNormalTexture = false;
+	bool hasOcclusionTexture = false;
+	bool hasEmissiveTexture = false;
 	Texture* baseColorTexture = nullptr;
 	Texture* metallicRoughnessTexture = nullptr;
 	Texture* normalTexture = nullptr;
@@ -68,6 +101,7 @@ public:
 
 	Material(vkm::VKMDevice* device) : device(device) {};
 	void createDescriptorSet(vk::DescriptorPool descriptorPool, vk::DescriptorSetLayout descriptorSetLayout, uint32_t descriptorBindingFlags);
+	[[nodiscard]] MaterialPushConstants pushConstants() const;
 };
 
 /*
@@ -173,7 +207,8 @@ enum RenderFlags {
 	BindImages = 0x00000001,
 	RenderOpaqueNodes = 0x00000002,
 	RenderAlphaMaskedNodes = 0x00000004,
-	RenderAlphaBlendedNodes = 0x00000008
+	RenderAlphaBlendedNodes = 0x00000008,
+	PushMaterialConstants = 0x00000010
 };
 
 class Model {

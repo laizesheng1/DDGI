@@ -28,6 +28,8 @@ void copyVolumeDescToDebugState(debug::DebugUIState& state, const ddgi::DDGIVolu
     state.maxRayDistance = desc.maxRayDistance;
     state.relocationEnabled = desc.relocationEnabled;
     state.classificationEnabled = desc.classificationEnabled;
+    state.probeMultiBounceEnabled = desc.probeMultiBounceEnabled;
+    state.probeMultiBounceIntensity = desc.probeMultiBounceIntensity;
 }
 
 struct ProbeStateCounts {
@@ -117,6 +119,8 @@ ddgi::DDGIVolumeDesc DDGISample::buildVolumeDescFromDebugState() const
     volumeDesc.maxRayDistance = (std::max)(debugState.maxRayDistance, 1.0f);
     volumeDesc.relocationEnabled = debugState.relocationEnabled;
     volumeDesc.classificationEnabled = debugState.classificationEnabled;
+    volumeDesc.probeMultiBounceEnabled = debugState.probeMultiBounceEnabled;
+    volumeDesc.probeMultiBounceIntensity = (std::max)(debugState.probeMultiBounceIntensity, 0.0f);
 
     if (debugState.distributionMode == debug::ProbeDistributionMode::ManualVolume ||
         !debugState.autoFitProbesToSceneBounds ||
@@ -368,13 +372,55 @@ void DDGISample::getEnabledExtensions()
     bufferDeviceAddressFeatures = support.bufferDeviceAddressFeatures;
     rayTracingPipelineFeatures = support.rayTracingPipelineFeatures;
     accelerationStructureFeatures = support.accelerationStructureFeatures;
+    //shaderDemoteFeatures = {};
+    //vulkan13Features = {};
+    void* shaderDemoteFeatureChain = nullptr;
+
+    const bool shaderDemoteExtensionSupported =
+        std::find(
+            VKMDevice->supportedExtensions.begin(),
+            VKMDevice->supportedExtensions.end(),
+            VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME) != VKMDevice->supportedExtensions.end();
+    if (shaderDemoteExtensionSupported) {
+        vk::PhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT availableShaderDemoteFeatures{};
+        vk::PhysicalDeviceFeatures2 availableFeatures{};
+        availableFeatures.pNext = &availableShaderDemoteFeatures;
+        VKMDevice->physicalDevice.getFeatures2(&availableFeatures);
+        if (availableShaderDemoteFeatures.shaderDemoteToHelperInvocation) {
+            AddLayerOrExtension(enabledDeviceExtensions, VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME);
+            shaderDemoteFeatures.shaderDemoteToHelperInvocation = VK_TRUE;
+            shaderDemoteFeatureChain = &shaderDemoteFeatures;
+        } else {
+            OutputMessage("[DDGI] {} is present but shaderDemoteToHelperInvocation feature is not supported\n",
+                          VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME);
+        }
+    } else if (VK_API_VERSION_MAJOR(VKMDevice->properties.apiVersion) > 1 ||
+               (VK_API_VERSION_MAJOR(VKMDevice->properties.apiVersion) == 1 &&
+                VK_API_VERSION_MINOR(VKMDevice->properties.apiVersion) >= 3)) {
+        vk::PhysicalDeviceVulkan13Features availableVulkan13Features{};
+        vk::PhysicalDeviceFeatures2 availableFeatures{};
+        availableFeatures.pNext = &availableVulkan13Features;
+        VKMDevice->physicalDevice.getFeatures2(&availableFeatures);
+        if (availableVulkan13Features.shaderDemoteToHelperInvocation) {
+            vulkan13Features.shaderDemoteToHelperInvocation = VK_TRUE;
+            shaderDemoteFeatureChain = &vulkan13Features;
+        } else {
+            OutputMessage("[DDGI] Vulkan 1.3 is present but shaderDemoteToHelperInvocation feature is not supported\n");
+        }
+    } else {
+        OutputMessage("[DDGI] {} is not supported; alpha-tested GBuffer shaders must be compiled without DemoteToHelperInvocation\n",
+                      VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME);
+    }
+
     bufferDeviceAddressFeatures.bufferDeviceAddress = VK_TRUE;
     rayTracingPipelineFeatures.rayTracingPipeline = VK_TRUE;
     accelerationStructureFeatures.accelerationStructure = VK_TRUE;
 
     accelerationStructureFeatures.pNext = &rayTracingPipelineFeatures;
     rayTracingPipelineFeatures.pNext = &bufferDeviceAddressFeatures;
-    bufferDeviceAddressFeatures.pNext = nullptr;
+    bufferDeviceAddressFeatures.pNext = shaderDemoteFeatureChain;
+    shaderDemoteFeatures.pNext = nullptr;
+    vulkan13Features.pNext = nullptr;
     deviceCreatepNextChain = &accelerationStructureFeatures;
 }
 
@@ -408,10 +454,12 @@ void DDGISample::recordFrame(vk::CommandBuffer commandBuffer)
     renderer.drawScene(
         commandBuffer,
         scene,
+        rayTracing.gpuSceneData(),
         displayWindows.camera,
         vk::Extent2D{width, height},
         &ddgiVolume,
-        debugState.enableDdgi);
+        debugState.enableDdgi,
+        debugState.ddgiIntensity);
 
     if (debugState.showProbeSpheres) {
         probeVisualizer.draw(commandBuffer, ddgiVolume, displayWindows.camera, vk::Extent2D{width, height});

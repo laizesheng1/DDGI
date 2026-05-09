@@ -189,17 +189,31 @@ void DDGIPipeline::create(vkm::VKMDevice* inDevice,
 
     const rt::RayTracingSupport rayTracingSupport = rt::RayTracingContext::querySupport(device->physicalDevice, device->supportedExtensions);
     if (rayTracingSupport.supported) {
-        std::array<vk::DescriptorSetLayoutBinding, 9> sceneBindings{};
+        std::array<vk::DescriptorSetLayoutBinding, 11> sceneBindings{};
         sceneBindings[0].setBinding(0)
             .setDescriptorType(vk::DescriptorType::eAccelerationStructureKHR)
             .setDescriptorCount(1)
             .setStageFlags(vk::ShaderStageFlagBits::eRaygenKHR | vk::ShaderStageFlagBits::eClosestHitKHR);
-        for (uint32_t bindingIndex = 1u; bindingIndex < sceneBindings.size(); ++bindingIndex) {
+        for (uint32_t bindingIndex = 1u; bindingIndex <= 4u; ++bindingIndex) {
             sceneBindings[bindingIndex].setBinding(bindingIndex)
-                .setDescriptorType(bindingIndex < 5u ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eCombinedImageSampler)
-                .setDescriptorCount(bindingIndex < 5u ? 1u : kMaxRtMaterialTextures)
+                .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+                .setDescriptorCount(1u)
                 .setStageFlags(vk::ShaderStageFlagBits::eClosestHitKHR | vk::ShaderStageFlagBits::eAnyHitKHR);
         }
+        for (uint32_t bindingIndex = 5u; bindingIndex <= 8u; ++bindingIndex) {
+            sceneBindings[bindingIndex].setBinding(bindingIndex)
+                .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+                .setDescriptorCount(kMaxRtMaterialTextures)
+                .setStageFlags(vk::ShaderStageFlagBits::eClosestHitKHR | vk::ShaderStageFlagBits::eAnyHitKHR);
+        }
+        sceneBindings[9].setBinding(9)
+            .setDescriptorType(vk::DescriptorType::eUniformBuffer)
+            .setDescriptorCount(1u)
+            .setStageFlags(vk::ShaderStageFlagBits::eClosestHitKHR);
+        sceneBindings[10].setBinding(10)
+            .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+            .setDescriptorCount(1u)
+            .setStageFlags(vk::ShaderStageFlagBits::eClosestHitKHR);
 
         vk::DescriptorSetLayoutCreateInfo sceneLayoutCreateInfo{};
         sceneLayoutCreateInfo.setBindings(sceneBindings);

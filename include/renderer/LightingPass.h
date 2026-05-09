@@ -5,6 +5,7 @@
 #include "camera.hpp"
 #include "ddgi/DDGIVolume.h"
 #include "renderer/GBufferPass.h"
+#include "scene/SceneGpuData.h"
 
 namespace renderer {
 
@@ -13,10 +14,14 @@ private:
     vkm::VKMDevice* device{nullptr};
     vk::DescriptorPool descriptorPoolHandle{VK_NULL_HANDLE};
     vk::DescriptorSetLayout descriptorSetLayoutHandle{VK_NULL_HANDLE};
+    vk::DescriptorSetLayout lightingDescriptorSetLayoutHandle{VK_NULL_HANDLE};
     vk::DescriptorSet descriptorSetHandle{VK_NULL_HANDLE};
+    vk::DescriptorSet lightingDescriptorSetHandle{VK_NULL_HANDLE};
     vk::PipelineLayout pipelineLayoutHandle{VK_NULL_HANDLE};
     vk::Pipeline pipelineHandle{VK_NULL_HANDLE};
-    std::array<vk::ImageView, 5> cachedImageViews{};
+    std::array<vk::ImageView, 6> cachedImageViews{};
+    vk::Buffer cachedLightingInfoBuffer{VK_NULL_HANDLE};
+    vk::Buffer cachedLightsBuffer{VK_NULL_HANDLE};
 
 public:
     /**
@@ -40,10 +45,12 @@ public:
      */
     void record(vk::CommandBuffer commandBuffer,
                 const GBufferPass& gbufferPass,
+                const scene::SceneGpuData& sceneGpuData,
                 const Camera& camera,
                 const ddgi::DDGIVolume& volume,
                 vk::Extent2D framebufferExtent,
-                bool enableDdgi);
+                bool enableDdgi,
+                float ddgiIntensity);
 
     [[nodiscard]] bool isCreated() const { return pipelineHandle != VK_NULL_HANDLE && pipelineLayoutHandle != VK_NULL_HANDLE; }
 };

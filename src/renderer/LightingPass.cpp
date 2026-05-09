@@ -10,7 +10,6 @@ namespace {
 
 struct LightingPushConstants {
     glm::vec4 cameraPosition{0.0f};
-    glm::vec4 lightDirectionAndIntensity{0.0f, 1.0f, 0.0f, 2.0f};
     glm::vec4 options{1.0f, 1.35f, 1.0f, 0.0f};
 };
 
@@ -86,12 +85,13 @@ void LightingPass::create(vkm::VKMDevice* inDevice,
 
     device = inDevice;
 
-    std::array<vk::DescriptorSetLayoutBinding, 5> gbufferBindings{
+    std::array<vk::DescriptorSetLayoutBinding, 6> gbufferBindings{
         makeGBufferBinding(0),
         makeGBufferBinding(1),
         makeGBufferBinding(2),
         makeGBufferBinding(3),
         makeGBufferBinding(4),
+        makeGBufferBinding(5),
     };
     vk::DescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo{};
     descriptorSetLayoutCreateInfo.setBindings(gbufferBindings);
@@ -100,10 +100,28 @@ void LightingPass::create(vkm::VKMDevice* inDevice,
         nullptr,
         &descriptorSetLayoutHandle));
 
-    vk::DescriptorPoolSize poolSize{};
-    poolSize.setType(vk::DescriptorType::eCombinedImageSampler).setDescriptorCount(5);
+    std::array<vk::DescriptorSetLayoutBinding, 2> lightingBindings{};
+    lightingBindings[0].setBinding(0)
+        .setDescriptorType(vk::DescriptorType::eUniformBuffer)
+        .setDescriptorCount(1)
+        .setStageFlags(vk::ShaderStageFlagBits::eFragment);
+    lightingBindings[1].setBinding(1)
+        .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+        .setDescriptorCount(1)
+        .setStageFlags(vk::ShaderStageFlagBits::eFragment);
+    vk::DescriptorSetLayoutCreateInfo lightingDescriptorSetLayoutCreateInfo{};
+    lightingDescriptorSetLayoutCreateInfo.setBindings(lightingBindings);
+    VK_CHECK_RESULT(device->logicalDevice.createDescriptorSetLayout(
+        &lightingDescriptorSetLayoutCreateInfo,
+        nullptr,
+        &lightingDescriptorSetLayoutHandle));
+
+    std::array<vk::DescriptorPoolSize, 3> poolSizes{};
+    poolSizes[0].setType(vk::DescriptorType::eCombinedImageSampler).setDescriptorCount(6);
+    poolSizes[1].setType(vk::DescriptorType::eUniformBuffer).setDescriptorCount(1);
+    poolSizes[2].setType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(1);
     vk::DescriptorPoolCreateInfo descriptorPoolCreateInfo{};
-    descriptorPoolCreateInfo.setMaxSets(1).setPoolSizeCount(1).setPPoolSizes(&poolSize);
+    descriptorPoolCreateInfo.setMaxSets(2).setPoolSizes(poolSizes);
     VK_CHECK_RESULT(device->logicalDevice.createDescriptorPool(
         &descriptorPoolCreateInfo,
         nullptr,
@@ -115,14 +133,21 @@ void LightingPass::create(vkm::VKMDevice* inDevice,
         .setPSetLayouts(&descriptorSetLayoutHandle);
     VK_CHECK_RESULT(device->logicalDevice.allocateDescriptorSets(&descriptorSetAllocateInfo, &descriptorSetHandle));
 
+    vk::DescriptorSetAllocateInfo lightingDescriptorSetAllocateInfo{};
+    lightingDescriptorSetAllocateInfo.setDescriptorPool(descriptorPoolHandle)
+        .setDescriptorSetCount(1)
+        .setPSetLayouts(&lightingDescriptorSetLayoutHandle);
+    VK_CHECK_RESULT(device->logicalDevice.allocateDescriptorSets(&lightingDescriptorSetAllocateInfo, &lightingDescriptorSetHandle));
+
     vk::PushConstantRange pushConstantRange{};
     pushConstantRange.setStageFlags(vk::ShaderStageFlagBits::eFragment)
         .setOffset(0)
         .setSize(sizeof(LightingPushConstants));
 
-    std::array<vk::DescriptorSetLayout, 2> setLayouts{
+    std::array<vk::DescriptorSetLayout, 3> setLayouts{
         descriptorSetLayoutHandle,
         ddgiSetLayout,
+        lightingDescriptorSetLayoutHandle,
     };
     vk::PipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
     pipelineLayoutCreateInfo.setSetLayouts(setLayouts)
@@ -237,43 +262,54 @@ void LightingPass::destroy()
     if (descriptorSetLayoutHandle != VK_NULL_HANDLE) {
         device->logicalDevice.destroyDescriptorSetLayout(descriptorSetLayoutHandle);
     }
+    if (lightingDescriptorSetLayoutHandle != VK_NULL_HANDLE) {
+        device->logicalDevice.destroyDescriptorSetLayout(lightingDescriptorSetLayoutHandle);
+    }
 
     cachedImageViews = {};
+    cachedLightingInfoBuffer = VK_NULL_HANDLE;
+    cachedLightsBuffer = VK_NULL_HANDLE;
     pipelineHandle = VK_NULL_HANDLE;
     pipelineLayoutHandle = VK_NULL_HANDLE;
     descriptorPoolHandle = VK_NULL_HANDLE;
     descriptorSetLayoutHandle = VK_NULL_HANDLE;
+    lightingDescriptorSetLayoutHandle = VK_NULL_HANDLE;
     descriptorSetHandle = VK_NULL_HANDLE;
+    lightingDescriptorSetHandle = VK_NULL_HANDLE;
     device = nullptr;
 }
 
 void LightingPass::record(vk::CommandBuffer commandBuffer,
                           const GBufferPass& gbufferPass,
+                          const scene::SceneGpuData& sceneGpuData,
                           const Camera& camera,
                           const ddgi::DDGIVolume& volume,
                           vk::Extent2D framebufferExtent,
-                          bool enableDdgi)
+                          bool enableDdgi,
+                          float ddgiIntensity)
 {
-    if (device == nullptr || !gbufferPass.isCreated() || pipelineHandle == VK_NULL_HANDLE) {
+    if (device == nullptr || !gbufferPass.isCreated() || pipelineHandle == VK_NULL_HANDLE || !sceneGpuData.isCreated()) {
         return;
     }
 
-    const std::array<vk::DescriptorImageInfo, 5> gbufferDescriptors{
+    const std::array<vk::DescriptorImageInfo, 6> gbufferDescriptors{
         gbufferPass.worldPosition().descriptorImageInfo,
         gbufferPass.normal().descriptorImageInfo,
         gbufferPass.albedo().descriptorImageInfo,
         gbufferPass.material().descriptorImageInfo,
+        gbufferPass.emissive().descriptorImageInfo,
         gbufferPass.depth().descriptorImageInfo,
     };
-    const std::array<vk::ImageView, 5> currentImageViews{
+    const std::array<vk::ImageView, 6> currentImageViews{
         gbufferPass.worldPosition().imageView,
         gbufferPass.normal().imageView,
         gbufferPass.albedo().imageView,
         gbufferPass.material().imageView,
+        gbufferPass.emissive().imageView,
         gbufferPass.depth().imageView,
     };
     if (currentImageViews != cachedImageViews) {
-        std::array<vk::WriteDescriptorSet, 5> descriptorWrites{};
+        std::array<vk::WriteDescriptorSet, 6> descriptorWrites{};
         for (uint32_t bindingIndex = 0; bindingIndex < descriptorWrites.size(); ++bindingIndex) {
             descriptorWrites[bindingIndex].setDstSet(descriptorSetHandle)
                 .setDstBinding(bindingIndex)
@@ -283,6 +319,26 @@ void LightingPass::record(vk::CommandBuffer commandBuffer,
         }
         device->logicalDevice.updateDescriptorSets(descriptorWrites, {});
         cachedImageViews = currentImageViews;
+    }
+
+    if (sceneGpuData.lightingInfoBufferObject().buffer != cachedLightingInfoBuffer ||
+        sceneGpuData.lightsBuffer().buffer != cachedLightsBuffer) {
+        const vk::DescriptorBufferInfo lightingInfoDescriptor = sceneGpuData.lightingInfoDescriptor();
+        const vk::DescriptorBufferInfo lightDescriptor = sceneGpuData.lightDescriptor();
+        std::array<vk::WriteDescriptorSet, 2> lightWrites{};
+        lightWrites[0].setDstSet(lightingDescriptorSetHandle)
+            .setDstBinding(0)
+            .setDescriptorCount(1)
+            .setDescriptorType(vk::DescriptorType::eUniformBuffer)
+            .setPBufferInfo(&lightingInfoDescriptor);
+        lightWrites[1].setDstSet(lightingDescriptorSetHandle)
+            .setDstBinding(1)
+            .setDescriptorCount(1)
+            .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+            .setPBufferInfo(&lightDescriptor);
+        device->logicalDevice.updateDescriptorSets(lightWrites, {});
+        cachedLightingInfoBuffer = sceneGpuData.lightingInfoBufferObject().buffer;
+        cachedLightsBuffer = sceneGpuData.lightsBuffer().buffer;
     }
 
     vk::Viewport viewport{};
@@ -303,11 +359,16 @@ void LightingPass::record(vk::CommandBuffer commandBuffer,
         descriptorSetHandle,
         {});
     volume.bindForLighting(commandBuffer, pipelineLayoutHandle, 1);
+    commandBuffer.bindDescriptorSets(
+        vk::PipelineBindPoint::eGraphics,
+        pipelineLayoutHandle,
+        2,
+        lightingDescriptorSetHandle,
+        {});
 
     LightingPushConstants pushConstants{};
     pushConstants.cameraPosition = glm::vec4(camera.position, 1.0f);
-    pushConstants.lightDirectionAndIntensity = glm::vec4(glm::normalize(glm::vec3(0.35f, 0.85f, 0.25f)), 1.8f);
-    pushConstants.options = glm::vec4(enableDdgi ? 1.0f : 0.0f, 1.35f, 1.0f, 0.0f);
+    pushConstants.options = glm::vec4(enableDdgi ? 1.0f : 0.0f, std::max(ddgiIntensity, 0.0f), 1.0f, 0.0f);
     commandBuffer.pushConstants(
         pipelineLayoutHandle,
         vk::ShaderStageFlagBits::eFragment,

@@ -62,13 +62,14 @@ vk::PipelineShaderStageCreateInfo makeStage(vk::ShaderModule shaderModule, vk::S
     return shaderStage;
 }
 
-std::array<vk::VertexInputAttributeDescription, 4> sceneVertexAttributes()
+std::array<vk::VertexInputAttributeDescription, 5> sceneVertexAttributes()
 {
     return {
         vk::VertexInputAttributeDescription{0, 0, vk::Format::eR32G32B32Sfloat, offsetof(vkmglTF::Vertex, pos)},
         vk::VertexInputAttributeDescription{1, 0, vk::Format::eR32G32B32Sfloat, offsetof(vkmglTF::Vertex, normal)},
         vk::VertexInputAttributeDescription{2, 0, vk::Format::eR32G32Sfloat, offsetof(vkmglTF::Vertex, uv)},
         vk::VertexInputAttributeDescription{3, 0, vk::Format::eR32G32B32A32Sfloat, offsetof(vkmglTF::Vertex, color)},
+        vk::VertexInputAttributeDescription{4, 0, vk::Format::eR32G32B32A32Sfloat, offsetof(vkmglTF::Vertex, tangent)},
     };
 }
 
@@ -129,7 +130,7 @@ void Renderer::create(vkm::VKMDevice* inDevice,
     };
 
     vk::VertexInputBindingDescription vertexBinding{0, sizeof(vkmglTF::Vertex), vk::VertexInputRate::eVertex};
-    const std::array<vk::VertexInputAttributeDescription, 4> vertexAttributes = sceneVertexAttributes();
+    const std::array<vk::VertexInputAttributeDescription, 5> vertexAttributes = sceneVertexAttributes();
     vk::PipelineVertexInputStateCreateInfo vertexInputState{};
     vertexInputState.setVertexBindingDescriptionCount(1)
         .setPVertexBindingDescriptions(&vertexBinding)
@@ -238,13 +239,15 @@ void Renderer::recordGBuffer(vk::CommandBuffer commandBuffer,
 
 void Renderer::drawScene(vk::CommandBuffer commandBuffer,
                          scene::Scene& scene,
+                         const scene::SceneGpuData& sceneGpuData,
                          const Camera& camera,
                          vk::Extent2D inFramebufferExtent,
                          const ddgi::DDGIVolume* volume,
-                         bool enableDdgi)
+                         bool enableDdgi,
+                         float ddgiIntensity)
 {
     if (lightingPass.isCreated() && gbufferPass.isCreated() && volume != nullptr) {
-        lightingPass.record(commandBuffer, gbufferPass, camera, *volume, inFramebufferExtent, enableDdgi);
+        lightingPass.record(commandBuffer, gbufferPass, sceneGpuData, camera, *volume, inFramebufferExtent, enableDdgi, ddgiIntensity);
         return;
     }
 

@@ -5,6 +5,7 @@
 #include "renderer/GBufferPass.h"
 #include "renderer/LightingPass.h"
 #include "scene/Scene.h"
+#include "scene/SceneGpuData.h"
 
 namespace renderer {
 
@@ -52,10 +53,12 @@ public:
      */
     void drawScene(vk::CommandBuffer commandBuffer,
                    scene::Scene& scene,
+                   const scene::SceneGpuData& sceneGpuData,
                    const Camera& camera,
                    vk::Extent2D framebufferExtent,
                    const ddgi::DDGIVolume* volume,
-                   bool enableDdgi);
+                   bool enableDdgi,
+                   float ddgiIntensity);
 };
 
 } // namespace renderer

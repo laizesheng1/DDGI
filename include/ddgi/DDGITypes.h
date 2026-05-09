@@ -15,7 +15,8 @@ enum class DDGIMovementType : uint32_t {
 
 enum DDGIUpdateFlags : uint32_t {
     RelocationEnabled = 1u << 0u,
-    ClassificationEnabled = 1u << 1u
+    ClassificationEnabled = 1u << 1u,
+    ProbeMultiBounceEnabled = 1u << 2u
 };
 
 enum DDGIProbeState : uint32_t {
@@ -45,23 +46,31 @@ struct DDGIVolumeDesc {
     // Retained for SDF debug/future paths. Strict RTXGI mode does not use SDF
     // distance as a probe classification or relocation input.
     float sdfProbePushDistance{0.35f};
-    // First-stage stability controls. They mirror RTXGI concepts but remain
-    // intentionally simple until material-aware hit shading and true
-    // relocation/classification are finished.
+    // RTXGI-style stability controls for probe radiance blending. The change
+    // threshold is intentionally high enough that ordinary rotated-ray noise
+    // does not lower hysteresis; only real lighting discontinuities should
+    // accelerate convergence. Brightness threshold limits frame-to-frame
+    // brightness impulses relative to the current history, not absolute energy.
     float maxRayDistance{1000.0f};
     float irradianceGamma{5.0f};
     float distanceExponent{32.0f};
-    float probeChangeThreshold{0.20f};
-    float probeBrightnessThreshold{2.00f};
+    float probeChangeThreshold{1.00f};              // 判断“是否发生大光照变化”
+    float probeBrightnessThreshold{1.50f};          // 限制单次更新亮度跃迁
     // Fixed rays keep deterministic directions for classification/relocation.
     // Atlas blending skips them when possible so lighting still benefits from
     // temporally rotated probe rays.
     uint32_t fixedRayCount{16u};
-    float probeBackfaceThreshold{0.25f};
-    float probeMinFrontfaceDistance{0.20f};
+    float probeBackfaceThreshold{0.25f};            // classification/relocation
+    float probeMinFrontfaceDistance{0.20f};         // relocation
     // Strict RTXGI classification tests fixed frontface hits against probe
     // voxel planes one probe spacing away from the current probe position.
     float probeCellPlaneScale{1.0f};
+    // Probe ray shading can feed the previous/history irradiance atlas back
+    // into hit radiance. This implements diffuse multi-bounce GI over frames
+    // rather than recursive same-frame ray tracing.
+    bool probeMultiBounceEnabled{true};
+    float probeMultiBounceIntensity{0.35f};
+    float probeMultiBounceMaxRadiance{2.00f};
     bool relocationEnabled{false};
     bool classificationEnabled{true};
     DDGIMovementType movementType{DDGIMovementType::Static};
@@ -84,6 +93,7 @@ struct DDGIFrameConstants {
     glm::vec4 sdfOriginAndMaxDistance{0.0f};
     glm::vec4 sdfVoxelSizeAndClearance{0.0f};
     glm::uvec4 sdfResolutionAndFlags{0u};
+    glm::vec4 multiBounceParams{0.0f};
 };
 
 enum class DebugTexture {

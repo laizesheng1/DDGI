@@ -4,6 +4,7 @@ layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inUV;
 layout(location = 3) in vec4 inColor;
+layout(location = 4) in vec4 inTangent;
 
 layout(push_constant) uniform ScenePushConstants {
     mat4 viewProjection;
@@ -13,6 +14,7 @@ layout(location = 0) out vec3 outWorldPosition;
 layout(location = 1) out vec3 outNormalWorld;
 layout(location = 2) out vec2 outUV;
 layout(location = 3) out vec4 outColor;
+layout(location = 4) out vec4 outTangentWorld;
 
 void main()
 {
@@ -24,4 +26,5 @@ void main()
     outNormalWorld = normalize(inNormal);
     outUV = inUV;
     outColor = inColor;
+    outTangentWorld = inTangent;
 }

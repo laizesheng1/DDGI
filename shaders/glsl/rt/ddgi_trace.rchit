@@ -1,7 +1,10 @@
 #version 460
 #extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
 
-const float DDGI_PI = 3.14159265358979323846;
+#include "../common/ddgi_common.glsl"
+#include "../common/light_common.glsl"
+
 const uint DDGI_RT_MATERIAL_FLAG_MASK = 1u;
 const uint DDGI_RT_MATERIAL_FLAG_BLEND = 2u;
 const uint DDGI_RT_MATERIAL_FLAG_BASE_COLOR_TEXTURE = 4u;
@@ -42,6 +45,37 @@ struct SceneRtMaterial {
     vec4 emissiveTextureTransform;
 };
 
+struct DDGIFrameConstants {
+    mat4 view;
+    mat4 projection;
+    vec4 cameraPosition;
+    vec4 volumeOriginAndRays;
+    vec4 probeSpacingAndHysteresis;
+    uvec4 probeCounts;
+    vec4 biasAndDebug;
+    uvec4 atlasLayout;
+    vec4 traceParams;
+    vec4 stabilityParams;
+    uvec4 updateParams;
+    vec4 scrollAnchorAndMovement;
+    vec4 sdfOriginAndMaxDistance;
+    vec4 sdfVoxelSizeAndClearance;
+    uvec4 sdfResolutionAndFlags;
+    vec4 multiBounceParams;
+};
+
+layout(set = 0, binding = 0) uniform DDGIConstantsBuffer {
+    DDGIFrameConstants constants;
+};
+
+layout(set = 0, binding = 3, std430) readonly buffer ProbeStatesBuffer {
+    uint probeStates[];
+};
+
+layout(set = 0, binding = 4, rgba16f) readonly uniform image2D irradianceAtlas;
+layout(set = 0, binding = 5, r32f) readonly uniform image2D depthAtlas;
+layout(set = 0, binding = 6, r32f) readonly uniform image2D depthSquaredAtlas;
+
 layout(set = 1, binding = 1, std430) readonly buffer SceneVertexAttributesBuffer {
     SceneRtVertexAttribute vertexAttributes[];
 };
@@ -62,6 +96,16 @@ layout(set = 1, binding = 5) uniform sampler2D baseColorTextures[DDGI_MAX_RT_MAT
 layout(set = 1, binding = 6) uniform sampler2D normalTextures[DDGI_MAX_RT_MATERIAL_TEXTURES];
 layout(set = 1, binding = 7) uniform sampler2D metallicRoughnessTextures[DDGI_MAX_RT_MATERIAL_TEXTURES];
 layout(set = 1, binding = 8) uniform sampler2D emissiveTextures[DDGI_MAX_RT_MATERIAL_TEXTURES];
+
+layout(set = 1, binding = 9) uniform SceneLightingInfoBuffer {
+    SceneLightingInfo sceneLighting;
+};
+
+layout(set = 1, binding = 10, std430) readonly buffer SceneLightBuffer {
+    SceneLight sceneLights[];
+};
+
+#include "../common/ddgi_query.glsl"
 
 vec2 applyUvTransform(vec2 uv, vec4 transform)
 {
@@ -163,12 +207,39 @@ void main()
         emissive *= texture(emissiveTextures[materialIndex], applyUvTransform(uv, material.emissiveTextureTransform)).rgb;
     }
 
-    vec3 sunDirectionWorld = normalize(vec3(-0.35, 0.80, -0.45));
-    float ndl = max(dot(shadingNormalWorld, sunDirectionWorld), 0.0);
     vec3 diffuseAlbedo = max(baseColor.rgb, vec3(0.0)) * (1.0 - metallic);
-    vec3 directDiffuse = diffuseAlbedo * ndl * mix(1.25, 0.80, roughness) / DDGI_PI;
+    vec3 hitPositionWorld = gl_WorldRayOriginEXT + rayDirectionWorld * hitDistanceWorld;
+    vec3 directDiffuse = vec3(0.0);
+    uint lightCount = min(sceneLighting.lightCounts.x, SCENE_MAX_LIGHTS);
+    for (uint lightIndex = 0u; lightIndex < lightCount; ++lightIndex) {
+        LightSample lightSample = evaluateSceneLight(sceneLights[lightIndex], hitPositionWorld);
+        float ndl = max(dot(shadingNormalWorld, lightSample.directionToLight), 0.0);
+        directDiffuse += diffuseAlbedo * lightSample.radiance * ndl / DDGI_PI;
+    }
 
-    payload.radiance = directDiffuse + emissive;
+    vec3 indirectDiffuse = vec3(0.0);
+    bool multiBounceEnabled = (constants.updateParams.z & 4u) != 0u;
+    bool historyIsValid = constants.probeCounts.w > 0u && constants.updateParams.w == 0u;
+    if (multiBounceEnabled && historyIsValid && constants.multiBounceParams.x > 0.0) {
+        // Probe trace runs before this frame's atlas update, so imageLoad()
+        // observes the previous/history irradiance atlas. That gives diffuse
+        // multi-bounce over time without recursive same-frame feedback.
+        indirectDiffuse = ddgiQueryIndirectDiffuse(
+            hitPositionWorld,
+            shadingNormalWorld,
+            -rayDirectionWorld,
+            diffuseAlbedo,
+            constants.multiBounceParams.x,
+            true);
+    }
+
+    vec3 tracedRadiance = directDiffuse + indirectDiffuse + emissive;
+    float radianceLimit = max(constants.multiBounceParams.y, 0.0);
+    if (radianceLimit > 0.0) {
+        tracedRadiance = min(tracedRadiance, vec3(radianceLimit));
+    }
+
+    payload.radiance = tracedRadiance;
     payload.distance = hitDistanceWorld;
     payload.direction = rayDirectionWorld;
     payload.distanceSquared = hitDistanceWorld * hitDistanceWorld;

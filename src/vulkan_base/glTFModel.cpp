@@ -7,7 +7,12 @@
 vk::DescriptorSetLayout vkmglTF::descriptorSetLayoutImage = VK_NULL_HANDLE;
 vk::DescriptorSetLayout vkmglTF::descriptorSetLayoutUbo = VK_NULL_HANDLE;
 vk::MemoryPropertyFlags vkmglTF::memoryPropertyFlags = {};
-uint32_t vkmglTF::descriptorBindingFlags = vkmglTF::DescriptorBindingFlags::ImageBaseColor;
+uint32_t vkmglTF::descriptorBindingFlags =
+	vkmglTF::DescriptorBindingFlags::ImageBaseColor |
+	vkmglTF::DescriptorBindingFlags::ImageNormalMap |
+	vkmglTF::DescriptorBindingFlags::ImageMetallicRoughness |
+	vkmglTF::DescriptorBindingFlags::ImageEmissive |
+	vkmglTF::DescriptorBindingFlags::ImageOcclusion;
 
 namespace vkmglTF
 {
@@ -43,31 +48,68 @@ void Material::createDescriptorSet(vk::DescriptorPool descriptorPool, vk::Descri
 		.setDescriptorSetCount(1)
 		.setPSetLayouts(&descriptorSetLayout);
 	VK_CHECK_RESULT(device->logicalDevice.allocateDescriptorSets(&descriptorSetAllocInfo, &descriptorSet));
-	std::vector<vk::DescriptorImageInfo> imageDescriptors{};
 	std::vector<vk::WriteDescriptorSet> writeDescriptorSets{}; 
+	auto appendTextureWrite = [&](uint32_t binding, const Texture* texture) {
+		vk::WriteDescriptorSet writeDescriptorSet;
+		writeDescriptorSet.setDstSet(descriptorSet)
+			.setDstBinding(binding)
+			.setDescriptorCount(1)
+			.setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+			.setImageInfo(texture->descriptorImageInfo);
+		writeDescriptorSets.push_back(writeDescriptorSet);
+	};
 
 	if (descriptorBindingFlags & DescriptorBindingFlags::ImageBaseColor) {
-		imageDescriptors.push_back(baseColorTexture->descriptorImageInfo);
-		vk::WriteDescriptorSet writeDescriptorSet;
-		writeDescriptorSet.setDstSet(descriptorSet)
-			.setDstBinding(static_cast<uint32_t>(writeDescriptorSets.size()))
-			.setDescriptorCount(1)
-			.setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
-			.setImageInfo(baseColorTexture->descriptorImageInfo);
-
-		writeDescriptorSets.push_back(writeDescriptorSet);
+		appendTextureWrite(0, baseColorTexture);
 	}
-	if (normalTexture && descriptorBindingFlags & DescriptorBindingFlags::ImageNormalMap) {
-		imageDescriptors.push_back(normalTexture->descriptorImageInfo);
-		vk::WriteDescriptorSet writeDescriptorSet;
-		writeDescriptorSet.setDstSet(descriptorSet)
-			.setDstBinding(static_cast<uint32_t>(writeDescriptorSets.size()))
-			.setDescriptorCount(1)
-			.setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
-			.setImageInfo(normalTexture->descriptorImageInfo);
-		writeDescriptorSets.push_back(writeDescriptorSet);
+	if (descriptorBindingFlags & DescriptorBindingFlags::ImageNormalMap) {
+		appendTextureWrite(1, normalTexture);
+	}
+	if (descriptorBindingFlags & DescriptorBindingFlags::ImageMetallicRoughness) {
+		appendTextureWrite(2, metallicRoughnessTexture);
+	}
+	if (descriptorBindingFlags & DescriptorBindingFlags::ImageEmissive) {
+		appendTextureWrite(3, emissiveTexture);
+	}
+	if (descriptorBindingFlags & DescriptorBindingFlags::ImageOcclusion) {
+		appendTextureWrite(4, occlusionTexture);
 	}
 	device->logicalDevice.updateDescriptorSets(static_cast<uint32_t>(writeDescriptorSets.size()), writeDescriptorSets.data(), 0, nullptr);
+}
+
+MaterialPushConstants Material::pushConstants() const
+{
+	MaterialPushConstants constants{};
+	constants.baseColorFactor = baseColorFactor;
+	constants.emissiveFactorAndAlphaCutoff = glm::vec4(emissiveFactor * emissiveStrength, alphaCutoff);
+	float flags = 0.0f;
+	if (alphaMode == ALPHAMODE_MASK) {
+		flags += static_cast<float>(MaterialFlagBits::MaterialFlagAlphaMask);
+	}
+	if (alphaMode == ALPHAMODE_BLEND) {
+		flags += static_cast<float>(MaterialFlagBits::MaterialFlagAlphaBlend);
+	}
+	if (doubleSided) {
+		flags += static_cast<float>(MaterialFlagBits::MaterialFlagDoubleSided);
+	}
+	if (hasBaseColorTexture) {
+		flags += static_cast<float>(MaterialFlagBits::MaterialFlagBaseColorTexture);
+	}
+	if (hasNormalTexture) {
+		flags += static_cast<float>(MaterialFlagBits::MaterialFlagNormalTexture);
+	}
+	if (hasMetallicRoughnessTexture) {
+		flags += static_cast<float>(MaterialFlagBits::MaterialFlagMetallicRoughnessTexture);
+	}
+	if (hasEmissiveTexture) {
+		flags += static_cast<float>(MaterialFlagBits::MaterialFlagEmissiveTexture);
+	}
+	if (hasOcclusionTexture) {
+		flags += static_cast<float>(MaterialFlagBits::MaterialFlagOcclusionTexture);
+	}
+	constants.metallicRoughnessOcclusionFlags = glm::vec4(metallicFactor, roughnessFactor, occlusionStrength, flags);
+	constants.normalScaleAndPadding = glm::vec4(normalScale, 0.0f, 0.0f, 0.0f);
+	return constants;
 }
 
 /*
@@ -590,10 +632,12 @@ void Model::loadMaterials(tinygltf::Model& gltfModel)
 		vkmglTF::Material material(device);
 		if (mat.values.find("baseColorTexture") != mat.values.end()) {
 			material.baseColorTexture = getTexture(gltfModel.textures[mat.values["baseColorTexture"].TextureIndex()].source);
+			material.hasBaseColorTexture = material.baseColorTexture != nullptr;
 		}
 		// Metallic roughness workflow
 		if (mat.values.find("metallicRoughnessTexture") != mat.values.end()) {
 			material.metallicRoughnessTexture = getTexture(gltfModel.textures[mat.values["metallicRoughnessTexture"].TextureIndex()].source);
+			material.hasMetallicRoughnessTexture = material.metallicRoughnessTexture != nullptr;
 		}
 		if (mat.values.find("roughnessFactor") != mat.values.end()) {
 			material.roughnessFactor = static_cast<float>(mat.values["roughnessFactor"].Factor());
@@ -604,17 +648,23 @@ void Model::loadMaterials(tinygltf::Model& gltfModel)
 		if (mat.values.find("baseColorFactor") != mat.values.end()) {
 			material.baseColorFactor = glm::make_vec4(mat.values["baseColorFactor"].ColorFactor().data());
 		}
+		if (mat.emissiveFactor.size() == 3) {
+			material.emissiveFactor = glm::make_vec3(mat.emissiveFactor.data());
+		}
+		material.doubleSided = mat.doubleSided;
 		if (mat.additionalValues.find("normalTexture") != mat.additionalValues.end()) {
 			material.normalTexture = getTexture(gltfModel.textures[mat.additionalValues["normalTexture"].TextureIndex()].source);
-		}
-		else {
-			material.normalTexture = &emptyTexture;
+			material.hasNormalTexture = material.normalTexture != nullptr;
+			material.normalScale = static_cast<float>(mat.additionalValues["normalTexture"].TextureScale());
 		}
 		if (mat.additionalValues.find("emissiveTexture") != mat.additionalValues.end()) {
 			material.emissiveTexture = getTexture(gltfModel.textures[mat.additionalValues["emissiveTexture"].TextureIndex()].source);
+			material.hasEmissiveTexture = material.emissiveTexture != nullptr;
 		}
 		if (mat.additionalValues.find("occlusionTexture") != mat.additionalValues.end()) {
 			material.occlusionTexture = getTexture(gltfModel.textures[mat.additionalValues["occlusionTexture"].TextureIndex()].source);
+			material.hasOcclusionTexture = material.occlusionTexture != nullptr;
+			material.occlusionStrength = static_cast<float>(mat.additionalValues["occlusionTexture"].TextureStrength());
 		}
 		if (mat.additionalValues.find("alphaMode") != mat.additionalValues.end()) {
 			tinygltf::Parameter param = mat.additionalValues["alphaMode"];
@@ -628,11 +678,34 @@ void Model::loadMaterials(tinygltf::Model& gltfModel)
 		if (mat.additionalValues.find("alphaCutoff") != mat.additionalValues.end()) {
 			material.alphaCutoff = static_cast<float>(mat.additionalValues["alphaCutoff"].Factor());
 		}
+		if (auto extension = mat.extensions.find("KHR_materials_emissive_strength"); extension != mat.extensions.end()) {
+			const tinygltf::Value& strength = extension->second.Get("emissiveStrength");
+			if (strength.IsNumber()) {
+				material.emissiveStrength = static_cast<float>(strength.GetNumberAsDouble());
+			}
+		}
+
+		// The renderer always binds a complete PBR material descriptor set.
+		// Missing glTF textures route to the 1x1 fallback so shader code can stay
+		// branch-light and both raster and RT paths use identical bindings.
+		if (material.baseColorTexture == nullptr) material.baseColorTexture = &emptyTexture;
+		if (material.normalTexture == nullptr) material.normalTexture = &emptyTexture;
+		if (material.metallicRoughnessTexture == nullptr) material.metallicRoughnessTexture = &emptyTexture;
+		if (material.emissiveTexture == nullptr) material.emissiveTexture = &emptyTexture;
+		if (material.occlusionTexture == nullptr) material.occlusionTexture = &emptyTexture;
 
 		materials.push_back(material);
 	}
 	// Push a default material at the end of the list for meshes with no material assigned
-	materials.push_back(Material(device));
+	{
+		Material defaultMaterial(device);
+		defaultMaterial.baseColorTexture = &emptyTexture;
+		defaultMaterial.normalTexture = &emptyTexture;
+		defaultMaterial.metallicRoughnessTexture = &emptyTexture;
+		defaultMaterial.emissiveTexture = &emptyTexture;
+		defaultMaterial.occlusionTexture = &emptyTexture;
+		materials.push_back(defaultMaterial);
+	}
 }
 
 void Model::loadFromFile(std::string filename, vk::Queue transferQueue, uint32_t fileLoadingFlags, float scale)
@@ -758,30 +831,26 @@ void Model::loadFromFile(std::string filename, vk::Queue transferQueue, uint32_t
 
 	// Setup descriptors
 	uint32_t uboCount = 0;
-	uint32_t imageCount = 0;
 	for (auto& node : linearNodes) {
 		if (node->mesh) {
 			uboCount++;
 		}
 	}
-	for (auto& material : materials) {
-		if (material.baseColorTexture != nullptr) {
-			imageCount++;
-		}
-	}
+	const uint32_t materialImageBindingCount =
+		((descriptorBindingFlags & DescriptorBindingFlags::ImageBaseColor) ? 1u : 0u) +
+		((descriptorBindingFlags & DescriptorBindingFlags::ImageNormalMap) ? 1u : 0u) +
+		((descriptorBindingFlags & DescriptorBindingFlags::ImageMetallicRoughness) ? 1u : 0u) +
+		((descriptorBindingFlags & DescriptorBindingFlags::ImageEmissive) ? 1u : 0u) +
+		((descriptorBindingFlags & DescriptorBindingFlags::ImageOcclusion) ? 1u : 0u);
+	const uint32_t imageDescriptorCount = static_cast<uint32_t>(materials.size()) * materialImageBindingCount;
 
 	std::vector<vk::DescriptorPoolSize> poolSizes = { { vk::DescriptorType::eUniformBuffer,uboCount } };
-	if (imageCount > 0) {
-		if (descriptorBindingFlags & DescriptorBindingFlags::ImageBaseColor) {
-			poolSizes.push_back({ vk::DescriptorType::eCombinedImageSampler, imageCount });
-		}
-		if (descriptorBindingFlags & DescriptorBindingFlags::ImageNormalMap) {
-			poolSizes.push_back({ vk::DescriptorType::eCombinedImageSampler, imageCount });
-		}
+	if (imageDescriptorCount > 0) {
+		poolSizes.push_back({ vk::DescriptorType::eCombinedImageSampler, imageDescriptorCount });
 	}
 
 	vk::DescriptorPoolCreateInfo descrptoPoolCreateInfo;
-	descrptoPoolCreateInfo.setMaxSets(uboCount + imageCount)
+	descrptoPoolCreateInfo.setMaxSets(uboCount + static_cast<uint32_t>(materials.size()))
 		.setPoolSizes(poolSizes);
 	VK_CHECK_RESULT(device->logicalDevice.createDescriptorPool(&descrptoPoolCreateInfo, nullptr, &descriptorPool));
 	// Descriptors for per-node uniform buffers
@@ -807,15 +876,21 @@ void Model::loadFromFile(std::string filename, vk::Queue transferQueue, uint32_t
 			if (descriptorBindingFlags & DescriptorBindingFlags::ImageNormalMap) {
 				setLayoutBindings.push_back({ static_cast<uint32_t>(setLayoutBindings.size()), vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eFragment });
 			}
+			if (descriptorBindingFlags & DescriptorBindingFlags::ImageMetallicRoughness) {
+				setLayoutBindings.push_back({ static_cast<uint32_t>(setLayoutBindings.size()), vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eFragment });
+			}
+			if (descriptorBindingFlags & DescriptorBindingFlags::ImageEmissive) {
+				setLayoutBindings.push_back({ static_cast<uint32_t>(setLayoutBindings.size()), vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eFragment });
+			}
+			if (descriptorBindingFlags & DescriptorBindingFlags::ImageOcclusion) {
+				setLayoutBindings.push_back({ static_cast<uint32_t>(setLayoutBindings.size()), vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eFragment });
+			}
 			vk::DescriptorSetLayoutCreateInfo descriptorLayoutCI;
-			descriptorLayoutCI.setBindingCount(1)
-				.setPBindings(setLayoutBindings.data());
+			descriptorLayoutCI.setBindings(setLayoutBindings);
 			VK_CHECK_RESULT(device->logicalDevice.createDescriptorSetLayout( &descriptorLayoutCI, nullptr, &descriptorSetLayoutImage));
 		}
 		for (auto& material : materials) {
-			if (material.baseColorTexture != nullptr) {
-				material.createDescriptorSet(descriptorPool, vkmglTF::descriptorSetLayoutImage, descriptorBindingFlags);
-			}
+			material.createDescriptorSet(descriptorPool, vkmglTF::descriptorSetLayoutImage, descriptorBindingFlags);
 		}
 	}
 }
@@ -846,6 +921,15 @@ void Model::drawNode(Node* node, vk::CommandBuffer commandBuffer, uint32_t rende
 			if (!skip) {
 				if (renderFlags & RenderFlags::BindImages) {
 					commandBuffer.bindDescriptorSets( vk::PipelineBindPoint::eGraphics, pipelineLayout, bindImageSet, 1, &material.descriptorSet, 0, nullptr);
+				}
+				if (renderFlags & RenderFlags::PushMaterialConstants) {
+					const MaterialPushConstants materialConstants = material.pushConstants();
+					commandBuffer.pushConstants(
+						pipelineLayout,
+						vk::ShaderStageFlagBits::eFragment,
+						MaterialPushConstantOffset,
+						sizeof(MaterialPushConstants),
+						&materialConstants);
 				}
 				commandBuffer.drawIndexed(primitive->indexCount, 1, primitive->firstIndex, 0, 0);
 			}
@@ -905,11 +989,25 @@ void Model::PreCalculations(uint32_t fileLoadingFlags, std::vector<vkmglTF::Vert
 						if (preTransform) {
 							vertex.pos = glm::vec3(localMatrix * glm::vec4(vertex.pos, 1.0f));
 							vertex.normal = glm::normalize(glm::mat3(localMatrix) * vertex.normal);
+							if (glm::length(glm::vec3(vertex.tangent)) > 1.0e-5f) {
+								vertex.tangent = glm::vec4(glm::normalize(glm::mat3(localMatrix) * glm::vec3(vertex.tangent)), vertex.tangent.w);
+								if (glm::determinant(glm::mat3(localMatrix)) < 0.0f) {
+									vertex.tangent.w *= -1.0f;
+								}
+							}
 						}
 						// Flip Y-Axis of vertex positions
 						if (flipY) {
 							vertex.pos.y *= -1.0f;
 							vertex.normal.y *= -1.0f;
+							if (glm::length(glm::vec3(vertex.tangent)) > 1.0e-5f) {
+								vertex.tangent.y *= -1.0f;
+								// A mirror changes tangent-space handedness. If
+								// the sign is not flipped with the tangent basis,
+								// normal maps can face away from the fallback key
+								// light and make floors/walls collapse to black.
+								vertex.tangent.w *= -1.0f;
+							}
 						}
 						// Pre-Multiply vertex colors with material base color
 						if (preMultiplyColor) {

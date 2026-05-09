@@ -46,8 +46,11 @@ void DebugUI::draw(vkm::HUD* ui, DebugUIState& state)
         ui->checkBox("Auto fit scene bounds", &state.autoFitProbesToSceneBounds);
         ui->checkBox("Relocation", &state.relocationEnabled);
         ui->checkBox("Classification", &state.classificationEnabled);
+        ui->checkBox("Probe multi-bounce", &state.probeMultiBounceEnabled);
         ui->sliderFloat("Probe density", &state.probeDensity, 0.25f, 3.0f);
+        ui->sliderFloat("DDGI intensity", &state.ddgiIntensity, 0.0f, 5.0f);
         ui->sliderFloat("History weight", &state.hysteresis, 0.0f, 0.99f);
+        ui->sliderFloat("Multi-bounce intensity", &state.probeMultiBounceIntensity, 0.0f, 1.5f);
         ui->inputFloat("Max ray distance", &state.maxRayDistance, 1.0f, 1);
 
         int32_t raysPerProbeOption = raysPerProbeOptionIndex(state.raysPerProbe);
