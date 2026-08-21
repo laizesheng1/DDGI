@@ -1,124 +1,110 @@
 # VK MiniRender DDGI
 
-VK MiniRender DDGI is a Vulkan Ray Tracing sample built on the existing `src/vulkan_base` framework. The DDGI implementation lives in the app, scene, rt, ddgi, renderer, debug, sdf, and shader modules; `vulkan_base` remains a reusable platform layer for device, swapchain, buffers, textures, HUD, and glTF loading.
+VK MiniRender DDGI is a Windows Vulkan sample for experimenting with Dynamic Diffuse Global Illumination (DDGI) on hardware ray-tracing capable GPUs. It builds the DDGI renderer around the reusable `src/vulkan_base` framework, which owns the Vulkan device, swapchain, resource helpers, HUD, and glTF loading infrastructure.
 
-Primary references:
+The project is a learning-oriented renderer rather than a packaged SDK. Its current focus is a single DDGI volume, ray-traced probe updates, deferred PBR lighting, and inspectable GPU resources.
 
-- [NVIDIA RTXGI-DDGI](https://github.com/NVIDIAGameWorks/RTXGI-DDGI)
-- [RTXGI DDGIVolume Reference](https://github.com/NVIDIAGameWorks/RTXGI-DDGI/blob/main/docs/DDGIVolume.md)
-- [RTXGI Integration Guide](https://github.com/NVIDIAGameWorks/RTXGI-DDGI/blob/main/docs/Integration.md)
+## Project structure
 
-## Module Responsibilities
-
-| Path | Responsibility |
+| Directory | Purpose |
 |---|---|
-| `src/vulkan_base/` | Existing Vulkan framework; not used for DDGI algorithm ownership |
-| `include/app` / `src/app` | Sample lifetime, frame recording, HUD state, DDGI setting application |
-| `include/scene` / `src/scene` | glTF scene, Scene AABB, RT compact geometry, material factors, RT texture descriptors |
-| `include/rt` / `src/rt` | RT feature checks, BLAS/TLAS, SBT, scene binding |
-| `include/ddgi` / `src/ddgi` | DDGI volume, resources, pipelines, trace/update/classify/relocate/SDF metadata passes |
-| `include/renderer` / `src/renderer` | Directional shadow map, GBuffer, fullscreen DDGI lighting, forward fallback |
-| `include/debug` / `src/debug` | HUD, probe sphere visualization, atlas window, probe stats |
-| `include/sdf` / `src/sdf` | GPU global unsigned distance field, surface voxelization, 3D Jump Flood generation, probe placement support |
-| `shaders/glsl` | Scene, lighting, DDGI, RT, and debug shaders |
+| `assets/` | glTF models and other runtime assets. |
+| `include/` | Public interfaces for the application, scene, RT, DDGI, renderer, debug, and SDF modules. |
+| `src/` | Implementation of the sample. `src/vulkan_base/` is the reusable Vulkan framework; the other modules implement project-specific rendering features. |
+| `shaders/glsl/` | GLSL source for scene rendering, DDGI, ray tracing, lighting, SDF, and debug passes. CMake compiles these files to SPIR-V. |
+| `external/` | Third-party source and binary dependencies used by the sample. |
+| `libs/` | Bundled platform libraries, including the Windows Vulkan fallback used by CMake when needed. |
+| `harness-template/` | DDGI-oriented engineering template containing architecture, coding, verification, and handoff guidance. |
+| `build/` | Generated CMake build tree; do not edit manually. |
+| `bin/` | Generated executables and runtime output. |
 
-## Frame Flow
+## Getting up and running
 
-```text
-ddgiVolume.updateConstants(camera, frameCounter)
-ddgiVolume.updateProbesFromSDF(commandBuffer, sdfVolume)
-ddgiVolume.traceProbeRays(commandBuffer, rayTracing.sceneBinding())
-ddgiVolume.updateProbes(commandBuffer)
+### Prerequisites
 
-renderer.recordGBuffer(commandBuffer, scene, rayTracing.gpuSceneData(), camera, extent)
+- Windows with a Vulkan ray-tracing capable GPU and a current Vulkan runtime/driver.
+- CMake 3.15 or newer.
+- A C++23-capable compiler. Visual Studio 2022 is the tested multi-configuration workflow.
+- Vulkan SDK tools available on `PATH`: `glslc` and `spirv-val`.
 
-begin main render pass
-renderer.drawScene(commandBuffer, scene, rayTracing.gpuSceneData(), camera, extent, &ddgiVolume, enableDdgi, ddgiIntensity, enableShadows, lightingDebugMode)
-probeVisualizer.draw(...)
-drawUI(...)
-end main render pass
+### Build and run
 
-atlasWindow.update(ddgiVolume, showAtlasWindow)
+From the repository root, configure and build the Release configuration:
+
+```powershell
+cmake -S . -B build
+cmake --build build --config Release
+.\bin\Release\VK_DDGI.exe
 ```
 
-## Implemented DDGI Features
+`VK_DDGI` depends on the `Shaders` target. Every supported shader stage under `shaders/glsl/` is compiled for Vulkan 1.3 and validated with `spirv-val` as part of the build.
 
-- Hardware RT probe tracing with `vkCmdTraceRaysKHR`, TLAS/BLAS, SBT, raygen/miss/any-hit/closest-hit shaders.
-- RT material shading from compact scene buffers plus per-material texture arrays:
-  - baseColor factor and texture
-  - normal map
-  - metallic-roughness texture and factors
-  - emissive factor and texture
-  - alpha mask / alpha cutoff via any-hit `ignoreIntersectionEXT`
-  - KHR_texture_transform scale/offset when exposed by tinygltf
-- Probe ray data stores radiance, distance, distance squared, ray direction, shading normal, and hit/frontface/backface flags.
-- Probe ray radiance now uses diffuse multi-bounce feedback: `L(ray) = L_directDiffuse + L_DDGIHistory * diffuseAlbedo / PI + L_emissive`. The DDGI term is queried at the closest-hit position from the previous/history irradiance atlas, then clamped before it is written to probe ray data.
-- glTF lighting is centralized in `SceneGpuData`: `KHR_lights_punctual` directional, point, and spot lights are parsed from node transforms and uploaded to a shared GPU light buffer. Scenes without glTF lights get one logged fallback directional light instead of shader-side hardcoded lighting.
-- The deferred renderer now uses a PBR GBuffer:
-  - world position
-  - normal after normal-map/TBN evaluation
-  - baseColor factor/texture and vertex color
-  - roughness, metallic, occlusion, alpha
-  - emissive factor/texture/strength
-- Screen lighting uses a Cook-Torrance metallic-roughness direct-light loop over the scene light buffer, then adds DDGI diffuse indirect, ambient, and emissive. The probe closest-hit shader uses the same light buffer for direct diffuse radiance injection, so screen shading and probe updates no longer depend on divergent hardcoded sun directions.
-- The screen direct-light path has an optional main directional-light shadow map. `ShadowPass` renders opaque and alpha-masked geometry into a 2048x2048 depth map using the scene bounds and primary directional light, then `ddgi_lighting.frag` applies 3x3 PCF, receiver normal bias, and depth bias at the centralized visibility term. Shadows are exposed as a HUD toggle so direct lighting can be isolated while tuning the light-space fit.
-- Fixed rays are deterministic and are the only geometry evidence used by strict RTXGI-style classification/relocation; rotated non-fixed rays feed irradiance and moments blending.
-- Inactive probes keep fixed-ray tracing but skip non-fixed rays, reducing RT work without deleting geometry evidence.
-- Irradiance atlas uses octahedral tiles with a one-texel border and gamma-encoded history blending.
-- Distance visibility uses first and second moments in separate atlas images, with Chebyshev visibility in the lighting gather.
-- Classification follows the RTXGI two-phase fixed-ray test: backface-heavy probes become inactive, then probes are active only when a fixed frontface hit is proven to lie inside the current probe voxel/cell.
-- Relocation follows the RTXGI fixed-ray path by comparing closest backface, closest frontface, and farthest frontface evidence, writing offsets only inside the 45% probe-cell relocation bound.
-- Lighting pass performs 8-probe trilinear gather, normal weighting, inactive-probe skip, and moment-based visibility.
-- The final lighting pass and probe closest-hit shader share the same GLSL DDGI query helper (`shaders/glsl/common/ddgi_query.glsl`) so screen shading and probe-surface feedback use matching trilinear, inactive-probe, normal-weight, and Chebyshev visibility behavior.
-- Common GLSL lighting helpers live in `shaders/glsl/common/light_common.glsl` and PBR helpers in `shaders/glsl/common/pbr_common.glsl`; the screen path uses the full BRDF while probe radiance injects the diffuse/emissive portion required by DDGI.
-- Clear history resets probe ray data, offsets, states, and atlases before the next update.
-- Scene fitting derives probe count, spacing, and origin from the loaded scene AABB.
-- GPU SDF generation builds a global unsigned scene distance field with surface seed voxelization, 3D Jump Flood propagation, and final R32F distance output.
-- SDF resources use separate 3D images for surface seeds, JFA ping/pong seeds, and final distance. Images stay in `General` layout so compute/debug passes can write or inspect the generated field without descriptor churn.
-- In strict RTXGI mode the SDF is debug/future data only. The pre-trace metadata pass no longer samples SDF distance, no longer pushes probe offsets from the SDF gradient, and never writes probe state; it only clamps externally edited offsets to the RTXGI 45% cell bound.
-- Probe debug spheres read the real probe offset/state buffers and color active/inactive probes differently.
-- Independent atlas window displays irradiance, depth, and depth-squared resources.
+## Features
 
-## RTXGI Alignment
+### Scene and ray tracing
 
-This project follows RTXGI DDGIVolume semantics for the main single-volume path:
+- glTF scene loading with compact GPU geometry and material data for rasterization and ray tracing.
+- `KHR_lights_punctual` directional, point, and spot lights, with a fallback directional light for scenes that do not provide one.
+- BLAS/TLAS construction, shader binding tables, and ray generation, miss, any-hit, and closest-hit shaders for probe tracing.
+- Textured base color, normal, metallic-roughness, emissive, alpha-mask, and texture-transform support in the compact RT material path.
 
-- DDGI resources are separated into probe ray data, irradiance atlas, distance/moment atlas data, probe offsets/states, constants, and debug-visible metadata.
-- Probe tracing separates fixed rays from temporally rotated rays.
-- Probe radiance supports RTXGI/paper-style diffuse multi-bounce by feeding historical probe irradiance back into new probe-ray hit radiance. This is temporal feedback through the atlas history, not same-frame recursive tracing.
-- Classification and relocation use deterministic fixed rays to avoid phase-driven flip-flop. Inactive probes still trace fixed rays, while non-fixed rays are skipped for inactive probes.
-- Atlas updates use hysteresis, gamma handling, brightness clamping, change-threshold acceleration, and border copies for filtered sampling.
-- Lighting gather uses probe cage interpolation, surface bias, inactive probe rejection, and moment visibility.
-- SDF is not part of strict RTXGI probe classification/relocation. Inside/backface and local-geometry decisions are fixed-ray and RT-driven.
+### DDGI
 
-## Project-Level Differences
+- A single DDGI volume with deterministic fixed rays and phase-interleaved rotated rays.
+- Probe-ray radiance, irradiance, distance, and distance-squared GPU resources with temporal atlas updates and border copies.
+- Moment-based visibility, trilinear probe gathering, surface bias, inactive-probe filtering, and diffuse multi-bounce feedback through atlas history.
+- Fixed-ray probe classification and relocation using backface and local-frontface evidence.
+- Probe-state/offset visualization, irradiance and distance atlas inspection, history reset, scene-AABB fitting, and runtime tuning through the HUD.
 
-- The sample currently targets one DDGI volume. Multi-volume blending is outside the current renderer flow.
-- Multi-bounce is diffuse-only. Specular/glossy multi-bounce and path-space material lobes are outside the current closest-hit shading model; metallic surfaces contribute less diffuse feedback through `baseColor * (1 - metallic)`.
-- The current shadow implementation is a single-scene directional shadow map with PCF. It is intentionally simpler than production cascaded shadow maps, EVSM/MSM, or contact shadows; point/spot shadows and probe-trace RT shadow rays are not enabled yet.
-- Screen texture transforms from `KHR_texture_transform` are not yet pushed through the `vulkan_base` material descriptor path; the RT compact material path keeps its existing transform support when tinygltf exposes those extension values.
-- Distance moments are stored as two R32F atlas images instead of one packed RG texture. This keeps compatibility with the existing atlas visualizer and descriptor layout while preserving the same mean/second-moment semantics.
-- Infinite scrolling state is present in CPU/shader constants, but the sample still rebuilds or moves the volume through settings rather than doing production RTXGI plane rolling with atlas history remapping.
-- Variability-driven update suppression is not yet a separate GPU resource path; update work is currently controlled by fixed rays, classification, inactive-probe skipping, and phase interleaving.
-- The SDF is a global unsigned distance field generated by surface voxelization plus 3D Jump Flood, not Lumen-style per-mesh signed distance fields or a watertight scene sign solver. It is retained for debug/future probe-placement experiments, but strict RTXGI classification/relocation ignores it.
-- Empty cells and cells without local fixed-ray frontface evidence are expected to become inactive. If a large open region loses too many active probes, increase probe density, reduce probe spacing, or adjust volume placement instead of relaxing the classifier.
-- Async compute queue ownership is not enabled because the existing framework exposes a single graphics/transfer queue path; barriers are explicit inside that queue.
+### Rendering and debug tools
 
-## Debug Controls
+- Deferred PBR GBuffer rendering with Cook-Torrance metallic-roughness direct lighting, emissive output, and DDGI diffuse indirect lighting.
+- Optional 2048×2048 rasterized shadow map for the main directional light, with PCF and receiver bias controls.
+- Lighting debug views for direct lighting, shadow visibility, shadow depth, receiver depth, and shadow-map coordinate diagnostics.
 
-The HUD exposes DDGI enable, lighting debug mode (final, direct only, shadow visibility, shadow depth, receiver depth, shadow delta), optional shadows, probe spheres, atlas window, radiance stats, probe status stats, auto-fit, relocation, classification, probe multi-bounce, probe density, history weight, multi-bounce intensity, max ray distance, rays per probe, fixed rays, update phases, distribution mode, apply settings, clear history, inactive/active probe counts, volume origin, radiance stats, and volume offset.
+### SDF
+
+- GPU generation of a global unsigned distance field using surface voxelization and 3D Jump Flood propagation.
+- The SDF is a planned project capability for probe placement and spatial queries. It is generated and retained as GPU data, but is not yet consumed by probe placement, classification, or relocation.
+
+## Frame flow
+
+```text
+Update DDGI constants and probe metadata
+        ↓
+Trace probe rays against the scene TLAS
+        ↓
+Update DDGI irradiance and distance atlases
+        ↓
+Record shadow map and GBuffer
+        ↓
+Run fullscreen PBR + DDGI lighting
+        ↓
+Draw probe/debug UI and update atlas inspection views
+```
+
+## Current boundaries
+
+- The renderer currently evaluates one DDGI volume; multi-volume selection and blending are not implemented.
+- Probe work is phase-interleaved. Fixed rays supply stable classification and relocation evidence, while non-fixed rays supply irradiance and distance blending.
+- The shadow system is one rasterized directional-light shadow map. Cascades, point/spot shadows, and RT visibility rays for probe light injection are not implemented.
+- The SDF is unsigned and global. It is not a per-mesh signed-distance-field system and has not yet been connected to DDGI placement or classification policy.
+- Infinite scrolling and variability-driven DDGI update scheduling are outside the current renderer flow.
+- The framework currently uses its single graphics/transfer queue path; async-compute ownership is not implemented.
 
 ## Validation
 
-Useful checks:
+After a successful build, use the included sample scenes and HUD to verify the main paths:
 
-1. Toggle DDGI and compare indirect diffuse contribution in Sponza.
-2. Use textured/alpha-masked assets and verify probe radiance follows baseColor/emissive textures and cutout alpha.
-3. Toggle probe multi-bounce off and confirm probe ray radiance falls back near the previous direct+emissive result; toggle it on and confirm indirect color gradually feeds through the atlas history after clear/reconvergence.
-4. Toggle classification/relocation and watch inactive probe count converge in a static scene; sparse empty cells becoming inactive is expected in strict RTXGI mode.
-5. Clear probe history and confirm atlas values reconverge.
-6. Open the atlas window and inspect irradiance/depth/depth-squared updates.
-7. Enable probe spheres and confirm active/inactive colors and relocated positions match real probe metadata.
-8. Enable relocation near walls/columns and confirm offsets come from fixed-ray backface/frontface evidence, not SDF distance.
+1. Toggle DDGI to isolate diffuse indirect lighting, then clear probe history and observe reconvergence.
+2. Toggle classification and relocation while visualizing probe states and offsets around walls or columns.
+3. Inspect irradiance, depth, and depth-squared atlases in the atlas window.
+4. Toggle the directional shadow map and use the lighting debug views to inspect visibility, stored depth, receiver depth, and projection coordinates.
+5. Load textured or alpha-masked assets and confirm both raster and probe-tracing paths respect their authored material data.
 
-Shader sources under `shaders/glsl/**` are compiled by the `Shaders` CMake target into `.spv` outputs.
+## References
+
+- [NVIDIA RTXGI](https://github.com/NVIDIA-RTX/RTXGI) provides the repository structure and documentation style used as inspiration here. Its current v2 repository focuses on NRC and SHaRC, and identifies DDGI as an RTXGI v1.x component.
+- [NVIDIA RTXGI-DDGI](https://github.com/NVIDIAGameWorks/RTXGI-DDGI) is the DDGI v1 reference implementation.
+- [DDGIVolume reference](https://github.com/NVIDIAGameWorks/RTXGI-DDGI/blob/main/docs/DDGIVolume.md) documents probe resources, classification, relocation, and tuning semantics.
+- [Integration guide](https://github.com/NVIDIAGameWorks/RTXGI-DDGI/blob/main/docs/Integration.md) describes the DDGI runtime integration sequence.
