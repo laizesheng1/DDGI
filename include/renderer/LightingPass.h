@@ -5,6 +5,7 @@
 #include "camera.hpp"
 #include "ddgi/DDGIVolume.h"
 #include "renderer/GBufferPass.h"
+#include "renderer/ShadowPass.h"
 #include "scene/SceneGpuData.h"
 
 namespace renderer {
@@ -22,6 +23,7 @@ private:
     std::array<vk::ImageView, 6> cachedImageViews{};
     vk::Buffer cachedLightingInfoBuffer{VK_NULL_HANDLE};
     vk::Buffer cachedLightsBuffer{VK_NULL_HANDLE};
+    vk::ImageView cachedShadowView{VK_NULL_HANDLE};
 
 public:
     /**
@@ -45,12 +47,15 @@ public:
      */
     void record(vk::CommandBuffer commandBuffer,
                 const GBufferPass& gbufferPass,
+                const ShadowPass& shadowPass,
                 const scene::SceneGpuData& sceneGpuData,
                 const Camera& camera,
                 const ddgi::DDGIVolume& volume,
                 vk::Extent2D framebufferExtent,
                 bool enableDdgi,
-                float ddgiIntensity);
+                float ddgiIntensity,
+                bool enableShadows,
+                uint32_t lightingDebugMode);
 
     [[nodiscard]] bool isCreated() const { return pipelineHandle != VK_NULL_HANDLE && pipelineLayoutHandle != VK_NULL_HANDLE; }
 };

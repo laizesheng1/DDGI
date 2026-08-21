@@ -95,6 +95,7 @@ void Renderer::create(vkm::VKMDevice* inDevice,
     device = inDevice;
     framebufferExtent = inFramebufferExtent;
 
+    shadowPass.create(device, pipelineCache);
     gbufferPass.create(device, pipelineCache, framebufferExtent, depthFormat);
     lightingPass.create(device, pipelineCache, renderPass, ddgiSetLayout);
 
@@ -213,6 +214,7 @@ void Renderer::destroy()
 
     lightingPass.destroy();
     gbufferPass.destroy();
+    shadowPass.destroy();
 
     if (forwardPipeline) {
         device->logicalDevice.destroyPipeline(forwardPipeline);
@@ -228,11 +230,15 @@ void Renderer::destroy()
 
 void Renderer::recordGBuffer(vk::CommandBuffer commandBuffer,
                              scene::Scene& scene,
+                             const scene::SceneGpuData& sceneGpuData,
                              const Camera& camera,
                              vk::Extent2D inFramebufferExtent)
 {
     if (!gbufferPass.isCreated() || !lightingPass.isCreated()) {
         return;
+    }
+    if (shadowPass.isCreated()) {
+        shadowPass.record(commandBuffer, scene, sceneGpuData);
     }
     gbufferPass.record(commandBuffer, scene, camera, inFramebufferExtent);
 }
@@ -244,10 +250,23 @@ void Renderer::drawScene(vk::CommandBuffer commandBuffer,
                          vk::Extent2D inFramebufferExtent,
                          const ddgi::DDGIVolume* volume,
                          bool enableDdgi,
-                         float ddgiIntensity)
+                         float ddgiIntensity,
+                         bool enableShadows,
+                         uint32_t lightingDebugMode)
 {
     if (lightingPass.isCreated() && gbufferPass.isCreated() && volume != nullptr) {
-        lightingPass.record(commandBuffer, gbufferPass, sceneGpuData, camera, *volume, inFramebufferExtent, enableDdgi, ddgiIntensity);
+        lightingPass.record(
+            commandBuffer,
+            gbufferPass,
+            shadowPass,
+            sceneGpuData,
+            camera,
+            *volume,
+            inFramebufferExtent,
+            enableDdgi,
+            ddgiIntensity,
+            enableShadows,
+            lightingDebugMode);
         return;
     }
 

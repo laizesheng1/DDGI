@@ -1,0 +1,4 @@
+interface:
+  display_name: "Handoff"
+  short_description: "Save and resume task handoff state"
+  default_prompt: "Use $handoff to save this task state or resume from docs/HANDOFF.md."

@@ -17,7 +17,7 @@ Primary references:
 | `include/scene` / `src/scene` | glTF scene, Scene AABB, RT compact geometry, material factors, RT texture descriptors |
 | `include/rt` / `src/rt` | RT feature checks, BLAS/TLAS, SBT, scene binding |
 | `include/ddgi` / `src/ddgi` | DDGI volume, resources, pipelines, trace/update/classify/relocate/SDF metadata passes |
-| `include/renderer` / `src/renderer` | GBuffer, fullscreen DDGI lighting, forward fallback |
+| `include/renderer` / `src/renderer` | Directional shadow map, GBuffer, fullscreen DDGI lighting, forward fallback |
 | `include/debug` / `src/debug` | HUD, probe sphere visualization, atlas window, probe stats |
 | `include/sdf` / `src/sdf` | GPU global unsigned distance field, surface voxelization, 3D Jump Flood generation, probe placement support |
 | `shaders/glsl` | Scene, lighting, DDGI, RT, and debug shaders |
@@ -30,10 +30,10 @@ ddgiVolume.updateProbesFromSDF(commandBuffer, sdfVolume)
 ddgiVolume.traceProbeRays(commandBuffer, rayTracing.sceneBinding())
 ddgiVolume.updateProbes(commandBuffer)
 
-renderer.recordGBuffer(commandBuffer, scene, camera, extent)
+renderer.recordGBuffer(commandBuffer, scene, rayTracing.gpuSceneData(), camera, extent)
 
 begin main render pass
-renderer.drawScene(commandBuffer, scene, rayTracing.gpuSceneData(), camera, extent, &ddgiVolume, enableDdgi)
+renderer.drawScene(commandBuffer, scene, rayTracing.gpuSceneData(), camera, extent, &ddgiVolume, enableDdgi, ddgiIntensity, enableShadows, lightingDebugMode)
 probeVisualizer.draw(...)
 drawUI(...)
 end main render pass
@@ -61,6 +61,7 @@ atlasWindow.update(ddgiVolume, showAtlasWindow)
   - roughness, metallic, occlusion, alpha
   - emissive factor/texture/strength
 - Screen lighting uses a Cook-Torrance metallic-roughness direct-light loop over the scene light buffer, then adds DDGI diffuse indirect, ambient, and emissive. The probe closest-hit shader uses the same light buffer for direct diffuse radiance injection, so screen shading and probe updates no longer depend on divergent hardcoded sun directions.
+- The screen direct-light path has an optional main directional-light shadow map. `ShadowPass` renders opaque and alpha-masked geometry into a 2048x2048 depth map using the scene bounds and primary directional light, then `ddgi_lighting.frag` applies 3x3 PCF, receiver normal bias, and depth bias at the centralized visibility term. Shadows are exposed as a HUD toggle so direct lighting can be isolated while tuning the light-space fit.
 - Fixed rays are deterministic and are the only geometry evidence used by strict RTXGI-style classification/relocation; rotated non-fixed rays feed irradiance and moments blending.
 - Inactive probes keep fixed-ray tracing but skip non-fixed rays, reducing RT work without deleting geometry evidence.
 - Irradiance atlas uses octahedral tiles with a one-texel border and gamma-encoded history blending.
@@ -94,7 +95,7 @@ This project follows RTXGI DDGIVolume semantics for the main single-volume path:
 
 - The sample currently targets one DDGI volume. Multi-volume blending is outside the current renderer flow.
 - Multi-bounce is diffuse-only. Specular/glossy multi-bounce and path-space material lobes are outside the current closest-hit shading model; metallic surfaces contribute less diffuse feedback through `baseColor * (1 - metallic)`.
-- Direct screen lighting currently has a centralized visibility term but no bound shadow-map resource in this branch. The probe trace path likewise uses unshadowed direct diffuse from the shared light buffer. A production shadow pass can attach at that single visibility point without changing material/light semantics.
+- The current shadow implementation is a single-scene directional shadow map with PCF. It is intentionally simpler than production cascaded shadow maps, EVSM/MSM, or contact shadows; point/spot shadows and probe-trace RT shadow rays are not enabled yet.
 - Screen texture transforms from `KHR_texture_transform` are not yet pushed through the `vulkan_base` material descriptor path; the RT compact material path keeps its existing transform support when tinygltf exposes those extension values.
 - Distance moments are stored as two R32F atlas images instead of one packed RG texture. This keeps compatibility with the existing atlas visualizer and descriptor layout while preserving the same mean/second-moment semantics.
 - Infinite scrolling state is present in CPU/shader constants, but the sample still rebuilds or moves the volume through settings rather than doing production RTXGI plane rolling with atlas history remapping.
@@ -105,7 +106,7 @@ This project follows RTXGI DDGIVolume semantics for the main single-volume path:
 
 ## Debug Controls
 
-The HUD exposes DDGI enable, probe spheres, atlas window, radiance stats, probe status stats, auto-fit, relocation, classification, probe multi-bounce, probe density, history weight, multi-bounce intensity, max ray distance, rays per probe, fixed rays, update phases, distribution mode, apply settings, clear history, inactive/active probe counts, volume origin, radiance stats, and volume offset.
+The HUD exposes DDGI enable, lighting debug mode (final, direct only, shadow visibility, shadow depth, receiver depth, shadow delta), optional shadows, probe spheres, atlas window, radiance stats, probe status stats, auto-fit, relocation, classification, probe multi-bounce, probe density, history weight, multi-bounce intensity, max ray distance, rays per probe, fixed rays, update phases, distribution mode, apply settings, clear history, inactive/active probe counts, volume origin, radiance stats, and volume offset.
 
 ## Validation
 

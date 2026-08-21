@@ -4,6 +4,7 @@
 #include "ddgi/DDGIVolume.h"
 #include "renderer/GBufferPass.h"
 #include "renderer/LightingPass.h"
+#include "renderer/ShadowPass.h"
 #include "scene/Scene.h"
 #include "scene/SceneGpuData.h"
 
@@ -12,6 +13,7 @@ namespace renderer {
 class Renderer {
 private:
     vkm::VKMDevice* device{nullptr};
+    ShadowPass shadowPass{};
     GBufferPass gbufferPass{};
     LightingPass lightingPass{};
     vk::PipelineLayout forwardPipelineLayout{VK_NULL_HANDLE};
@@ -43,6 +45,7 @@ public:
      */
     void recordGBuffer(vk::CommandBuffer commandBuffer,
                        scene::Scene& scene,
+                       const scene::SceneGpuData& sceneGpuData,
                        const Camera& camera,
                        vk::Extent2D framebufferExtent);
 
@@ -58,7 +61,9 @@ public:
                    vk::Extent2D framebufferExtent,
                    const ddgi::DDGIVolume* volume,
                    bool enableDdgi,
-                   float ddgiIntensity);
+                   float ddgiIntensity,
+                   bool enableShadows,
+                   uint32_t lightingDebugMode);
 };
 
 } // namespace renderer

@@ -448,7 +448,7 @@ void DDGISample::recordFrame(vk::CommandBuffer commandBuffer)
         .setRenderArea(renderArea)
         .setClearValues(clearValues);
 
-    renderer.recordGBuffer(commandBuffer, scene, displayWindows.camera, vk::Extent2D{width, height});
+    renderer.recordGBuffer(commandBuffer, scene, rayTracing.gpuSceneData(), displayWindows.camera, vk::Extent2D{width, height});
 
     commandBuffer.beginRenderPass(renderPassBeginInfo, vk::SubpassContents::eInline);
     renderer.drawScene(
@@ -459,7 +459,9 @@ void DDGISample::recordFrame(vk::CommandBuffer commandBuffer)
         vk::Extent2D{width, height},
         &ddgiVolume,
         debugState.enableDdgi,
-        debugState.ddgiIntensity);
+        debugState.ddgiIntensity,
+        debugState.enableShadows,
+        static_cast<uint32_t>(debugState.lightingDebugMode));
 
     if (debugState.showProbeSpheres) {
         probeVisualizer.draw(commandBuffer, ddgiVolume, displayWindows.camera, vk::Extent2D{width, height});

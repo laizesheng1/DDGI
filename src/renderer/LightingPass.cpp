@@ -1,5 +1,6 @@
 #include "renderer/LightingPass.h"
 
+#include <algorithm>
 #include <array>
 #include <fstream>
 #include <string>
@@ -11,6 +12,8 @@ namespace {
 struct LightingPushConstants {
     glm::vec4 cameraPosition{0.0f};
     glm::vec4 options{1.0f, 1.35f, 1.0f, 0.0f};
+    glm::mat4 shadowLightViewProjection{1.0f};
+    glm::vec4 shadowParams{0.0f};
 };
 
 std::string shaderPath(const char* relativePath)
@@ -100,13 +103,17 @@ void LightingPass::create(vkm::VKMDevice* inDevice,
         nullptr,
         &descriptorSetLayoutHandle));
 
-    std::array<vk::DescriptorSetLayoutBinding, 2> lightingBindings{};
+    std::array<vk::DescriptorSetLayoutBinding, 3> lightingBindings{};
     lightingBindings[0].setBinding(0)
         .setDescriptorType(vk::DescriptorType::eUniformBuffer)
         .setDescriptorCount(1)
         .setStageFlags(vk::ShaderStageFlagBits::eFragment);
     lightingBindings[1].setBinding(1)
         .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+        .setDescriptorCount(1)
+        .setStageFlags(vk::ShaderStageFlagBits::eFragment);
+    lightingBindings[2].setBinding(2)
+        .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
         .setDescriptorCount(1)
         .setStageFlags(vk::ShaderStageFlagBits::eFragment);
     vk::DescriptorSetLayoutCreateInfo lightingDescriptorSetLayoutCreateInfo{};
@@ -117,7 +124,7 @@ void LightingPass::create(vkm::VKMDevice* inDevice,
         &lightingDescriptorSetLayoutHandle));
 
     std::array<vk::DescriptorPoolSize, 3> poolSizes{};
-    poolSizes[0].setType(vk::DescriptorType::eCombinedImageSampler).setDescriptorCount(6);
+    poolSizes[0].setType(vk::DescriptorType::eCombinedImageSampler).setDescriptorCount(7);
     poolSizes[1].setType(vk::DescriptorType::eUniformBuffer).setDescriptorCount(1);
     poolSizes[2].setType(vk::DescriptorType::eStorageBuffer).setDescriptorCount(1);
     vk::DescriptorPoolCreateInfo descriptorPoolCreateInfo{};
@@ -269,6 +276,7 @@ void LightingPass::destroy()
     cachedImageViews = {};
     cachedLightingInfoBuffer = VK_NULL_HANDLE;
     cachedLightsBuffer = VK_NULL_HANDLE;
+    cachedShadowView = VK_NULL_HANDLE;
     pipelineHandle = VK_NULL_HANDLE;
     pipelineLayoutHandle = VK_NULL_HANDLE;
     descriptorPoolHandle = VK_NULL_HANDLE;
@@ -281,12 +289,15 @@ void LightingPass::destroy()
 
 void LightingPass::record(vk::CommandBuffer commandBuffer,
                           const GBufferPass& gbufferPass,
+                          const ShadowPass& shadowPass,
                           const scene::SceneGpuData& sceneGpuData,
                           const Camera& camera,
                           const ddgi::DDGIVolume& volume,
                           vk::Extent2D framebufferExtent,
                           bool enableDdgi,
-                          float ddgiIntensity)
+                          float ddgiIntensity,
+                          bool enableShadows,
+                          uint32_t lightingDebugMode)
 {
     if (device == nullptr || !gbufferPass.isCreated() || pipelineHandle == VK_NULL_HANDLE || !sceneGpuData.isCreated()) {
         return;
@@ -322,10 +333,14 @@ void LightingPass::record(vk::CommandBuffer commandBuffer,
     }
 
     if (sceneGpuData.lightingInfoBufferObject().buffer != cachedLightingInfoBuffer ||
-        sceneGpuData.lightsBuffer().buffer != cachedLightsBuffer) {
+        sceneGpuData.lightsBuffer().buffer != cachedLightsBuffer ||
+        shadowPass.depth().imageView != cachedShadowView) {
         const vk::DescriptorBufferInfo lightingInfoDescriptor = sceneGpuData.lightingInfoDescriptor();
         const vk::DescriptorBufferInfo lightDescriptor = sceneGpuData.lightDescriptor();
-        std::array<vk::WriteDescriptorSet, 2> lightWrites{};
+        const vk::DescriptorImageInfo shadowDescriptor = shadowPass.isCreated()
+            ? shadowPass.depth().descriptorImageInfo
+            : gbufferPass.depth().descriptorImageInfo;
+        std::array<vk::WriteDescriptorSet, 3> lightWrites{};
         lightWrites[0].setDstSet(lightingDescriptorSetHandle)
             .setDstBinding(0)
             .setDescriptorCount(1)
@@ -336,9 +351,15 @@ void LightingPass::record(vk::CommandBuffer commandBuffer,
             .setDescriptorCount(1)
             .setDescriptorType(vk::DescriptorType::eStorageBuffer)
             .setPBufferInfo(&lightDescriptor);
+        lightWrites[2].setDstSet(lightingDescriptorSetHandle)
+            .setDstBinding(2)
+            .setDescriptorCount(1)
+            .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+            .setPImageInfo(&shadowDescriptor);
         device->logicalDevice.updateDescriptorSets(lightWrites, {});
         cachedLightingInfoBuffer = sceneGpuData.lightingInfoBufferObject().buffer;
         cachedLightsBuffer = sceneGpuData.lightsBuffer().buffer;
+        cachedShadowView = shadowDescriptor.imageView;
     }
 
     vk::Viewport viewport{};
@@ -368,7 +389,16 @@ void LightingPass::record(vk::CommandBuffer commandBuffer,
 
     LightingPushConstants pushConstants{};
     pushConstants.cameraPosition = glm::vec4(camera.position, 1.0f);
-    pushConstants.options = glm::vec4(enableDdgi ? 1.0f : 0.0f, std::max(ddgiIntensity, 0.0f), 1.0f, 0.0f);
+    pushConstants.options = glm::vec4(
+        enableDdgi ? 1.0f : 0.0f,
+        std::max(ddgiIntensity, 0.0f),
+        1.0f,
+        static_cast<float>(lightingDebugMode));
+    pushConstants.shadowLightViewProjection = shadowPass.data().lightViewProjection;
+    pushConstants.shadowParams = shadowPass.data().params;
+    if (!enableShadows) {
+        pushConstants.shadowParams.x = 0.0f;
+    }
     commandBuffer.pushConstants(
         pipelineLayoutHandle,
         vk::ShaderStageFlagBits::eFragment,

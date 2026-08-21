@@ -115,12 +115,25 @@ glm::vec3 transformVector(const glm::mat4& transform, const glm::vec3& direction
 SceneLightGpuData fallbackDirectionalLight()
 {
     SceneLightGpuData light{};
-    light.positionAndType = glm::vec4(0.0f, 0.0f, 0.0f, static_cast<float>(SceneLightDirectional));
+    // Directional lights do not use position for attenuation or direct
+    // lighting. Keep a virtual position here anyway and derive direction from
+    // it, so tuning the fallback "sun" is intuitive and the stored position is
+    // still useful for debug output. These values are chosen from the current
+    // Sponza bounds:
+    //   min=(-15.37, -11.44, -9.15), max=(14.40, 1.01, 9.15)
+    // The light is placed slightly left of the scene's Z axis (negative X),
+    // near the top of the bounds, and aimed down toward the central floor.
+    const glm::vec3 sceneCenter(-0.48f, -5.21f, 0.0f);
+    const glm::vec3 virtualLightPosition(-6.50f, 1.01f, -2.25f);
+    const glm::vec3 directionToLight = glm::normalize(virtualLightPosition - sceneCenter);
+
+    light.positionAndType = glm::vec4(virtualLightPosition, static_cast<float>(SceneLightDirectional));
     // Many sample Sponza glTF files do not carry KHR_lights_punctual. Use a
-    // clear upper-front directional key light so the PBR path is visibly lit
-    // even before DDGI has converged. The shader stores directional lights as
-    // "surface-to-light" vectors, not the physical ray travel direction.
-    light.directionAndRange = glm::vec4(glm::normalize(glm::vec3(-0.45f, 0.90f, -0.30f)), 0.0f);
+    // slightly grazing side light instead of a mostly top-down sun; otherwise
+    // the roof/arcades legitimately shadow almost every visible interior pixel
+    // when the directional shadow map is enabled. The shader stores this as a
+    // "surface-to-light" vector, not the physical ray travel direction.
+    light.directionAndRange = glm::vec4(directionToLight, 0.0f);
     light.colorAndIntensity = glm::vec4(1.0f, 0.96f, 0.88f, 5.0f);
     light.spotAngles = glm::vec4(0.0f, -1.0f, 0.0f, 0.0f);
     return light;

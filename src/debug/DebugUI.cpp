@@ -44,6 +44,24 @@ void DebugUI::draw(vkm::HUD* ui, DebugUIState& state)
         ui->checkBox("Show radiance stats", &state.showProbeRadianceStats);
         ui->checkBox("Show probe status", &state.showProbeStatusStats);
         ui->checkBox("Auto fit scene bounds", &state.autoFitProbesToSceneBounds);
+        ui->checkBox("Enable shadows", &state.enableShadows);
+        int32_t lightingDebugMode = static_cast<int32_t>(state.lightingDebugMode);
+        if (ui->comboBox(
+                "Lighting debug",
+                &lightingDebugMode,
+                {"Final",
+                 "Direct only",
+                 "Shadow visibility",
+                 "Shadow depth",
+                 "Receiver depth",
+                 "Shadow delta",
+                 "Shadow UV",
+                 "Shadow vis raw Y",
+                 "Shadow depth raw Y",
+                 "Shadow delta raw Y",
+                 "Shadow vis reverse"})) {
+            state.lightingDebugMode = static_cast<LightingDebugMode>(lightingDebugMode);
+        }
         ui->checkBox("Relocation", &state.relocationEnabled);
         ui->checkBox("Classification", &state.classificationEnabled);
         ui->checkBox("Probe multi-bounce", &state.probeMultiBounceEnabled);

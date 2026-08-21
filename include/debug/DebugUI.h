@@ -11,6 +11,20 @@ enum class ProbeDistributionMode {
     ManualVolume = 1
 };
 
+enum class LightingDebugMode {
+    FinalLighting = 0,
+    DirectLightingOnly = 1,
+    ShadowVisibility = 2,
+    ShadowMapDepth = 3,
+    ShadowReceiverDepth = 4,
+    ShadowDepthDelta = 5,
+    ShadowUv = 6,
+    ShadowVisibilityFlipY = 7,
+    ShadowDepthFlipY = 8,
+    ShadowDepthDeltaFlipY = 9,
+    ShadowVisibilityReverseCompare = 10
+};
+
 struct DebugUIState {
     bool enableDdgi{true};
     bool showProbeSpheres{true};
@@ -18,6 +32,8 @@ struct DebugUIState {
     bool showProbeRadianceStats{false};         //比较消耗绘制性能
     bool showProbeStatusStats{false};
     bool autoFitProbesToSceneBounds{true};
+    bool enableShadows{false};
+    LightingDebugMode lightingDebugMode{LightingDebugMode::FinalLighting};
     bool relocationEnabled{false};              //每个当前 phase 的 probe 会根据 fixed rays 里的 backface hit 来移动自己的 local offset
     bool classificationEnabled{true};           //每个 probe 会用当前 phase 里刚 trace 出来的 fixed ray 数据判断自己是不是应该 inactive，把可能在几何体里的 probe 从 lighting 和后续 trace 中里剔掉
     bool probeMultiBounceEnabled{true};

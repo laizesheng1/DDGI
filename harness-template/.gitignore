@@ -1,0 +1,52 @@
+# Local configuration and generated outputs
+.env*
+build/
+cmake-build-*/
+bin/Debug/
+bin/Release/
+bin/RelWithDebInfo/
+bin/MinSizeRel/
+compile_commands.json
+
+# Local agent and cache state is not part of the DDGI harness.
+.codex/
+.pytest_cache/
+
+# Python and test output
+__pycache__/
+*.pyc
+*.pyo
+*.egg
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+env/
+
+# Logs and temp outputs
+.tmp/
+.intermediate/
+output/
+*.log
+*.tmp
+*.temp
+*.bak
+*.json.bak
+*.txt.bak
+.playwright-cli/
+.playwright-mcp/
+
+# IDE and OS
+.idea/
+.vscode/*
+!.vscode/tasks.json
+*.code-workspace
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
